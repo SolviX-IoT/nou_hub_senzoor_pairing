@@ -1,0 +1,15 @@
+# Reguli pentru tot proiectul. Nodul senzor are in plus senzor/.gitignore,
+# cu iesirile MPLAB X si intermediarele XC8.
+
+# --- Iesirile de compilare ale hub-ului (Arduino IDE / arduino-cli) ---
+hub/**/build/
+hub/**/*.bin
+hub/**/*.elf
+hub/**/*.hex
+
+# --- Sistem de operare / editoare ---
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~

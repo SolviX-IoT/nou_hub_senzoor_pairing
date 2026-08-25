@@ -41,6 +41,12 @@ Ambele module radio sunt SX1276, deci parametrii radio trebuie sa fie
    emitator; acum are si `LoRa_Receive()`.
 6. **Memorie ne-volatila pe senzor** — HEF (High-Endurance Flash), pentru
    identitate, cheie de sesiune si frame counter.
+7. **Pairing manual pe senzor** — senzorul nu se mai inroleaza singur.
+   Fara sesiune sta in repaus si tace; fereastra de pairing se deschide
+   tinand **butonul 2 (RC5) apasat ~3 secunde**, iar LED2 clipeste cat
+   este deschisa. Fereastra se inchide dupa `PAIRING_MAX_ATTEMPTS`
+   incercari de join. Simetric cu hub-ul, care si el asculta `JOIN_REQ`
+   doar in fereastra deschisa manual cu `pair`.
 
 ### Structura folderelor
 
@@ -102,8 +108,14 @@ retea LoRa "de manual".
 
    | | flash (words) | RAM (octeti) |
    |---|---|---|
-   | PIC16LF1508 are | 4096 | 256 |
-   | firmware-ul actual | **3761** (91.8%) | **250** (97.7%) |
+   | PIC16LF1508 are | 4096 (3968 utilizabili, HEF rezervat) | 256 |
+   | firmware-ul actual | **3936** (99.2%) | **233** (91.0%) |
+
+   Cifra de 3761 de cuvinte / 250 de octeti din versiunile anterioare ale
+   acestui fisier era masuratoarea de dinainte de F-029 (care a mutat
+   `AppKey` din RAM in HEF) si de dinainte de pairing-ul manual. Valorile
+   de mai sus sunt cele masurate acum, cu `xc8-cc` v3.10, `-O2`, cu HEF
+   rezervat; vezi si sectiunea 11.
 
    Ce s-a pastrat: inrolarea, cheia de sesiune derivata, MIC-ul pe
    fiecare pachet, anti-replay-ul si confidentialitatea payload-ului.
@@ -162,9 +174,9 @@ identice cu cele din `teste-sistemcomplet/`.
 | **RC7** | **LoRa MOSI** (SDO la PIC) | iesire | `TRISC=0x37` bit7=0 | fix hardware |
 | **RC2** | **NTC 10K 3950** -> **AN6** | intrare analogica | `ANSELC=0x06` (ANSC1+ANSC2), `TRISC2=1` | `pins.c` |
 | **RC4** | **Buton 1** (activ HIGH, pull-down extern) | intrare digitala | `TRISC4=1` | `main.c` |
-| **RC5** | **Buton 2** (activ HIGH, pull-down extern) | intrare digitala | `TRISC5=1` | `main.c` |
+| **RC5** | **Buton 2** — **tinut ~3 s deschide pairing-ul** (activ HIGH, pull-down extern) | intrare digitala | `TRISC5=1` | `main.c`, `ButtonPair_HeldLong()` |
 | **RC3** | **LED 1** — transmisie de date | iesire | `ANSC3=0`, `TRISC3=0` | `main.c` |
-| **RC6** | **LED 2** — pairing / eroare de join | iesire | `ANSC6=0`, `TRISC6=0` | `main.c` |
+| **RC6** | **LED 2** — pairing / eroare de join; **clipeste** cat fereastra de pairing e deschisa | iesire | `ANSC6=0`, `TRISC6=0` | `main.c` |
 | **RC1** | **TPL5110 DONE** | iesire, **LOW permanent** | `ANSC1=0`, `TRISC1=0` | `main.c` (F-018) |
 | RA0 / RA1 | ICSPDAT / ICSPCLK (programare) | — | `LVP=ON` | `config_bits.c` |
 | RA3 | MCLR / VPP | intrare | `MCLRE=ON` | `config_bits.c` |
@@ -172,8 +184,16 @@ identice cu cele din `teste-sistemcomplet/`.
 **Rolul LED-urilor s-a schimbat** fata de firmware-ul de temperatura:
 inainte LED1 = transmisie periodica si LED2 = transmisie fortata de
 buton; acum **LED1 = transmisie de date** (orice `DATA_ENC` reusit) si
-**LED2 = pairing** (aprins in timpul unei incercari de join, trei clipiri
-scurte la esec, doua pulsuri la reusita, un puls la primirea unui ACK).
+**LED2 = pairing**: clipeste la 5 Hz cat timp butonul 2 este tinut apasat
+si cat timp fereastra de pairing este deschisa, aprins continuu in timpul
+unei incercari de join, trei clipiri scurte la esec, doua pulsuri la
+reusita, un puls la primirea unui ACK.
+
+**Butonul 2 (RC5) nu mai este liber.** `Button_RawPressed()` citeste in
+continuare DOAR RC4, si blocul comentat pentru RC5 din interiorul ei
+trebuie sa ramana comentat: daca RC5 ar forta si transmisii, cele trei
+secunde de tinut apasat ar declansa in acelasi timp si fereastra de
+pairing, si un sir de `DATA_ENC`.
 
 **NECONECTATE / NEDEFINITE IN COD (presupuneri documentate):**
 
@@ -472,7 +492,7 @@ interpretat gresit octet cu octet.
 
 | Fisier | Rol |
 |--------|-----|
-| `main.c` | **Firmware-ul complet**, in 16 sectiuni numerotate: parametri, pini, registre SX1276, protocol, HEF, XTEA/CBC-MAC/CTR, starea device-ului, NVM, driver LoRa (TX **si RX**), ADC+NTC, butoane, LED-uri, construirea pachetelor, initializare, inrolare, bucla principala. |
+| `main.c` | **Firmware-ul complet**, in 16 sectiuni numerotate: parametri, pini, registre SX1276, protocol, HEF, XTEA/CBC-MAC/CTR, starea device-ului, NVM, driver LoRa (TX **si RX**), ADC+NTC, butoane (inclusiv `ButtonPair_HeldLong()` pentru pairing-ul manual), LED-uri, construirea pachetelor, initializare, inrolare, bucla principala cu cele trei stari `IDLE` / `JOINING` / `OPERATING`. |
 | `main_powercycle_test.c.bak` | Testul provizoriu de power-cycle prin TPL5110. Pastrat ca referinta pentru F-011…F-014. Extensia `.bak` il tine in afara compilarii, iar `nbproject/configurations.xml` listeaza oricum doar `main.c`. |
 | `mcc_generated_files/system/src/config_bits.c` | Configuration bits: `FOSC=INTOSC`, `WDTE=OFF`, `MCLRE=ON`, `BOREN=ON`, `LVP=ON`, `PWRTE=OFF`. **`WRT=OFF` este obligatoriu pentru HEF.** |
 | `mcc_generated_files/system/src/clock.c`, `clock.h` | Oscilator intern la **16 MHz** (`_XTAL_FREQ = 16000000`). |
@@ -751,6 +771,34 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
   space`, verifica INTAI ca optimizarea este `-O2` in fereastra de
   proprietati a proiectului, nu in fisiere - IDE-ul le suprascrie.
 
+### F-030 — Fiecare `__delay_ms()` cu o constanta noua costa ~25 de cuvinte
+- **Simptom:** adaugarea pairing-ului manual (o functie care numara
+  apasarea butonului 2 si o bucla de asteptare cu LED2 clipind) a umflat
+  firmware-ul cu **173 de cuvinte**, de la 3843 la 4016, iar
+  link-editarea a picat cu `can't find N words for psect ... in class
+  CODE` — adica exact esecul din F-024, dar din alta cauza.
+- **Cauza:** `__delay_ms()` nu este o functie, ci o macro care emite o
+  bucla de intarziere **inline la fiecare loc de apel**. Cele doua bucle
+  noi aveau intre ele patru intarzieri distincte (100 ms, 20 ms, 10 ms si
+  inca un 100 ms), fiecare cu propriul cod generat. Din cele 173 de
+  cuvinte, peste 100 erau bucle de intarziere duplicate, nu logica.
+- **Fix, trei masuri:**
+  1. o singura functie `Pairing_BlinkStep()` detine **unicul**
+     `__delay_ms(PAIR_HOLD_TICK_MS)` din firmware, iar ambele bucle de
+     pairing o apeleaza;
+  2. numaratoarea apasarii si asteptarea eliberarii butonului au fost
+     unificate intr-o singura bucla `while (apasat)`, cu un contor care
+     se opreste la prag — deci un singur loc de intarziere in loc de trei;
+  3. debounce-ul separat la 20 ms pentru RC5 a fost scos: bucla reciteste
+     oricum pinul de 30 de ori la 100 ms distanta si abandoneaza la prima
+     citire LOW, ceea ce este un filtru de bounce mai strict decat cel din
+     `Button_Pressed()` (F-015), nu mai slab.
+- **Rezultat:** 4016 -> **3936** de cuvinte, adica sub cele 3968
+  utilizabile, cu 32 de cuvinte de marja.
+- **De retinut:** pe acest device, o intarziere inline cu o valoare noua
+  se pune la socoteala ca o functie de ~25 de cuvinte. Cand ai nevoie de
+  temporizare in doua locuri, imparte acelasi pas, nu copia randul.
+
 ---
 
 ## 10. Reguli de lucru in acest proiect
@@ -789,7 +837,10 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
     proiectului**, nu editand fisierele: MPLAB X rescrie
     `Makefile-default.mk` la fiecare build (F-029). Dupa orice adaugare
     de cod pe senzor, **citeste raportul de memorie** — marja este de
-    ~125 de cuvinte si 25 de octeti.
+    **32 de cuvinte si 23 de octeti** (dupa pairing-ul manual). Daca mai
+    e nevoie de spatiu, economia usoara ramasa este cea numita in F-028:
+    frame counter-ul se impacheteaza inca prin deplasari pe 32 de biti
+    (`Nvm_LoadFrameCounter` are singur 192 de cuvinte).
 14. **Pe senzor, evita `int32_t` in codul fierbinte** (F-028). O
     inmultire sau o impartire pe 32 de biti costa peste 100 de cuvinte de
     program pe PIC16. Foloseste uniunea `Word32` pentru conversii
@@ -809,7 +860,9 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
 | Dupa reset de alimentare, senzorul reia comunicarea fara re-pairing si fara reutilizarea unui counter | HEF + saltul cu `FCNT_CHECKPOINT_EVERY` (sectiunea 7.1) |
 | `remove <DevEUI>` + `RESET` dezinroleaza curat | `commandRemove()` + `pendingReset` in `handleEncryptedData()` |
 | Registrul hub-ului persista peste repornire | `DeviceRegistry` pe NVS |
-| Firmware-ul senzorului **incape** in PIC16LF1508 | **VERIFICAT** cu `xc8-cc` v3.10, `-O2`, cu HEF rezervat, in AMBELE configuratii: Production 3843 words / 231 octeti, Debug cu Snap 3844 / 231. A fost nevoie de trecerea de la AES la XTEA (F-024) plus reducerile din F-025, F-028 si F-029. |
+| Senzorul se inroleaza **doar la cererea explicita a utilizatorului** | `DEV_STATE_IDLE` este starea implicita in `senzor/main.c`; fereastra se deschide numai din `ButtonPair_HeldLong()` (butonul 2 tinut ~3 s) si se inchide dupa `PAIRING_MAX_ATTEMPTS` incercari |
+| Dupa `CMD_DOWN(RESET)` senzorul nu se re-inroleaza singur | ramura `CMD_TYPE_RESET` trece in `DEV_STATE_IDLE`, nu in `DEV_STATE_JOINING` |
+| Firmware-ul senzorului **incape** in PIC16LF1508 | **VERIFICAT** cu `xc8-cc` v3.10, `-O2`, cu HEF rezervat, in AMBELE configuratii: Production **3936** / 3968 words si **233** / 256 octeti, Debug cu Snap **3937** / 233. Ultimul cuvant de cod este la `0x0F7F` in ambele, deci regiunea HEF este curata. Marja ramasa: **32 de cuvinte**. A fost nevoie de trecerea de la AES la XTEA (F-024) plus reducerile din F-025, F-028, F-029 si F-030. |
 
 ---
 
@@ -847,5 +900,13 @@ raman toate. Alte corectii din audit: RAM-ul real este 256 B, nu 512
 codul se scria peste ea (F-027); aritmetica pe 32 de biti a fost scoasa
 din codul fierbinte (F-028). `JOIN_ACCEPT` s-a scurtat de la 22 la 10
 octeti. Hub-ul nu mai depinde de biblioteca `Crypto`. Rezultat masurat cu
-`xc8-cc` v3.10, `-O2`, cu HEF rezervat: **3761/4096 cuvinte (91.8%) si
-250/256 octeti (97.7%)**.*
+`xc8-cc` v3.10, `-O2`, cu HEF rezervat: **3936/3968 cuvinte utilizabile
+si 233/256 octeti** (Debug cu Snap: 3937/233).*
+
+*Actualizare 2026-08-25 — **pairing manual pe senzor**: fara sesiune,
+senzorul sta in `DEV_STATE_IDLE` si tace; fereastra de inrolare se
+deschide tinand butonul 2 (RC5) apasat ~3 secunde si se inchide dupa
+`PAIRING_MAX_ATTEMPTS` = 10 incercari, cu LED2 clipind cat este deschisa.
+`CMD_DOWN(RESET)` duce senzorul in repaus, nu inapoi in pairing. Hub-ul
+nu s-a modificat deloc. Incadrarea a cerut F-030 (o singura bucla de
+intarziere impartita intre cele doua bucle de pairing).*

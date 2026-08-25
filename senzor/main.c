@@ -160,6 +160,30 @@
  *     normala este 1. */
 #define PAIRING_ENCRYPT_PAYLOAD 1
 
+/* --- Pairing manual, din butonul 2 (RC5) --------------------------- */
+
+/* Cat trebuie tinut apasat butonul 2 ca sa se deschida fereastra de
+ * pairing. Se numara in pasi de PAIR_HOLD_TICK_MS cu un contor de un
+ * octet: 30 x 100 ms = 3 s. Pasi de 10 ms ar fi cerut 300 de pasi, deci
+ * un uint16_t si aritmetica pe 16 biti platita degeaba (F-028).
+ * Acelasi pas este si perioada de clipire a lui LED2 cat timp fereastra
+ * de pairing este deschisa: fiecare __delay_ms() cu o constanta noua
+ * genereaza inca o bucla de intarziere inline, deci refolosirea aceleiasi
+ * valori peste tot economiseste cuvinte de program. */
+#define PAIR_HOLD_TICK_MS       100U
+#define PAIR_HOLD_TICKS         30U
+
+/* Cate incercari de join incape fereastra de pairing a senzorului.
+ * Fereastra se masoara in INCERCARI, nu in milisecunde: cele 120 s ale
+ * hub-ului nu intra intr-un uint16_t, iar un uint32_t nou in codul
+ * fierbinte costa zeci-sute de cuvinte de program pe PIC16 (F-028).
+ * Cu backoff-ul de mai jos (3 s, +3 s dupa fiecare esec, plafonat la
+ * 30 s) cele 10 incercari insumeaza 3+6+...+30 = 165 s de asteptare,
+ * deci acopera confortabil PAIRING_MODE_TIMEOUT_MS = 120 s din
+ * hub/SolvixHub_Tests/Config.h: fereastra hub-ului se inchide prima,
+ * ceea ce este ordinea dorita. */
+#define PAIRING_MAX_ATTEMPTS    10U
+
 /* 1 = cat timp senzorul NU este inrolat, temperatura se trimite si in
  *     clar, ca pachetul vechi de 6 octeti (TEMP_PLAIN). Util la bring-up,
  *     cu testul 7 al hub-ului. In exploatare se lasa pe 0: un senzor
@@ -207,7 +231,7 @@
 
 /* --- Butoane (active HIGH, pull-down extern) ----------------------- */
 #define BUTTON_FORCE_PORT       PORTCbits.RC4   /* butonul 1 */
-#define BUTTON_SPARE_PORT       PORTCbits.RC5   /* butonul 2, nefolosit */
+#define BUTTON_SPARE_PORT       PORTCbits.RC5   /* butonul 2, pairing    */
 
 /* --- LED-uri -------------------------------------------------------- */
 #define LED1_LAT                LATCbits.LATC3  /* transmisie de date    */
@@ -788,8 +812,18 @@ static void Xtea_CtrWithLoadedKey(const uint8_t *iv, uint8_t *data,
  * 7. STAREA DEVICE-ULUI (identitate, sesiune, contoare)
  * ================================================================== */
 
+/*
+ * DEV_STATE_IDLE este starea implicita: un senzor fara sesiune NU se mai
+ * inroleaza singur, ci tace pana cand utilizatorul tine butonul 2 apasat
+ * trei secunde. Motivul este simetria cu hub-ul, care accepta JOIN_REQ
+ * doar in fereastra deschisa manual cu 'pair': un senzor care emitea la
+ * nesfarsit ocupa canalul fara sa aiba cine sa-i raspunda.
+ * DEV_STATE_JOINING inseamna de acum "fereastra de pairing este
+ * deschisa", nu "incerc la nesfarsit".
+ */
 #define DEV_STATE_JOINING       0U
 #define DEV_STATE_OPERATING     1U
+#define DEV_STATE_IDLE          2U
 
 static uint8_t  devEui[DEV_EUI_LEN];
 static uint8_t  sessKey[CRYPTO_KEY_LEN];
@@ -806,7 +840,7 @@ static uint8_t  devNonce[DEV_NONCE_LEN];
  * si numai pe calea de inrolare - calea de date foloseste SessKey.
  */
 
-static uint8_t  deviceState = DEV_STATE_JOINING;
+static uint8_t  deviceState = DEV_STATE_IDLE;
 static uint32_t frameCounter = 0UL;
 
 /* Cate transmisii s-au facut de la ultimul checkpoint in HEF. Numara
@@ -1492,8 +1526,11 @@ static uint8_t Button_RawPressed(void)
         return 1U;
     }
 
-    /* Decomenteaza daca vrei ca si butonul 2 (RC5) sa forteze o
-     * transmisie:
+    /* RC5 NU se citeste aici, si blocul de mai jos trebuie sa ramana
+     * comentat: butonul 2 are acum o functie proprie (pairing manual,
+     * ButtonPair_HeldLong). Daca ar forta si transmisii, cele trei
+     * secunde de tinut apasat ar declansa in acelasi timp si fereastra
+     * de pairing, si un sir de DATA_ENC pe acelasi canal.
      * if (BUTTON_SPARE_PORT != 0U) { return 1U; }
      */
 
@@ -1525,6 +1562,70 @@ static void Button_WaitRelease(void)
         __delay_ms(TX_TICK_MS);
     }
     __delay_ms(BUTTON_DEBOUNCE_MS);
+}
+
+/* --- Butonul 2 (RC5): pairing manual -------------------------------- */
+
+/*
+ * Un pas de asteptare cu LED2 comutat. Este SINGURUL loc din firmware
+ * unde exista o intarziere de PAIR_HOLD_TICK_MS, si de aceea este o
+ * functie si nu doua randuri copiate: __delay_ms() genereaza cod inline
+ * la fiecare loc de apel, iar o bucla de intarziere de 100 ms costa vreo
+ * 25 de cuvinte. Cele doua bucle de pairing (numaratoarea butonului si
+ * asteptarea dintre incercarile de join) o impart pe aceasta.
+ */
+static void Pairing_BlinkStep(void)
+{
+    LED2_LAT ^= 1;
+    __delay_ms(PAIR_HOLD_TICK_MS);
+}
+
+/* Nivelul brut al butonului 2. Tinut separat de Button_RawPressed()
+ * dinadins: RC5 deschide fereastra de pairing, nu forteaza o
+ * transmisie. */
+static uint8_t ButtonPair_RawPressed(void)
+{
+    return (uint8_t)((BUTTON_SPARE_PORT != 0U) ? 1U : 0U);
+}
+
+/*
+ * Intoarce 1 daca butonul 2 a fost tinut apasat PAIR_HOLD_TICKS pasi de
+ * PAIR_HOLD_TICK_MS, adica trei secunde. O apasare scurta nu face nimic:
+ * intrarea in pairing sterge sesiunea unui senzor deja inrolat, deci nu
+ * are voie sa poata fi declansata dintr-o atingere.
+ *
+ * Debounce-ul cerut de F-015 este chiar bucla de mai jos: pinul se
+ * reciteste de 30 de ori, la 100 ms distanta, si prima citire LOW
+ * abandoneaza numaratoarea. Un bounce nu are cum sa treaca de ea, deci o
+ * recitire separata la 20 ms, ca in Button_Pressed(), ar costa cuvinte de
+ * program fara sa adauge nimic.
+ *
+ * Bucla acopera si asteptarea eliberarii: dupa atingerea pragului
+ * continua sa se invarta pana cand butonul este dat drumul, altfel
+ * aceeasi apasare ar fi citita a doua oara de bucla apelanta. Contorul se
+ * opreste la prag, deci nu se poate rasuci.
+ *
+ * Functia se cheama la fiecare pas de asteptare din bucla de date, deci
+ * calea "buton neapasat" este ieftina dinadins: o citire de port si o
+ * comparatie.
+ */
+static uint8_t ButtonPair_HeldLong(void)
+{
+    uint8_t ticks = 0U;
+
+    while (ButtonPair_RawPressed() != 0U)
+    {
+        if (ticks < PAIR_HOLD_TICKS)
+        {
+            ticks++;
+        }
+
+        Pairing_BlinkStep();
+    }
+
+    LED2_LAT = 0;
+
+    return (uint8_t)((ticks >= PAIR_HOLD_TICKS) ? 1U : 0U);
 }
 
 /* =====================================================================
@@ -1875,24 +1976,33 @@ static void Board_StartupBlink(void)
     __delay_ms(300);
 }
 
-/* Asteptare in pasi de TX_TICK_MS. Intoarce 1 daca a fost intrerupta de
- * apasarea butonului, ca sa nu para placa blocata in timpul backoff-ului
- * de join. */
-static uint8_t Wait_Interruptible(uint16_t milliseconds)
+/*
+ * Asteptare in pasi de TX_TICK_MS, cu LED2 clipind: fereastra de pairing
+ * este deschisa si trebuie sa se vada de la distanta ca senzorul asteapta
+ * un JOIN_ACCEPT. Nu exista timer hardware (F-017) si nu se adauga unul
+ * acum, deci clipirea se obtine comutand LED2 la fiecare pas al buclei de
+ * asteptare - nu o a treia bucla de temporizare.
+ *
+ * Pasul este PAIR_HOLD_TICK_MS, nu TX_TICK_MS: da direct clipirea de
+ * 5 Hz, scuteste contorul separat de pasi si, mai ales, imparte cu
+ * ButtonPair_HeldLong singura bucla de intarziere de 100 ms din firmware
+ * (Pairing_BlinkStep). Precizia pierduta este de cel mult 100 ms peste un
+ * backoff masurat in secunde.
+ *
+ * Butonul 1 nu se citeste aici: in fereastra de pairing o transmisie
+ * fortata nu are ce sa forteze, iar butonul 2 se asculta doar dupa
+ * inchiderea ferestrei, ca o apasare lunga sa nu reporneasca fereastra
+ * peste ea insasi.
+ */
+static void Wait_PairingBlink(uint16_t milliseconds)
 {
     uint16_t waited;
 
-    for (waited = 0U; waited < milliseconds; waited = (uint16_t)(waited + TX_TICK_MS))
+    for (waited = 0U; waited < milliseconds;
+         waited = (uint16_t)(waited + PAIR_HOLD_TICK_MS))
     {
-        if (Button_Pressed() != 0U)
-        {
-            Button_WaitRelease();
-            return 1U;
-        }
-        __delay_ms(TX_TICK_MS);
+        Pairing_BlinkStep();
     }
-
-    return 0U;
 }
 
 /* =====================================================================
@@ -1958,6 +2068,8 @@ int main(void)
     uint16_t joinBackoffMs;
     uint8_t  loraReady;
     uint8_t  forcedByButton;
+    uint8_t  rePair;            /* butonul 2 tinut apasat in exploatare */
+    uint8_t  joinAttempts;      /* incercari in fereastra curenta        */
     uint8_t  rxLength;
     uint8_t  command;
     uint8_t  tempPacket[LORA_PACKET_LEN];
@@ -1990,7 +2102,9 @@ int main(void)
     }
     else
     {
-        deviceState = DEV_STATE_JOINING;
+        /* Fara sesiune senzorul NU se mai inroleaza singur: tace pana
+         * cand utilizatorul tine butonul 2 apasat trei secunde. */
+        deviceState = DEV_STATE_IDLE;
     }
 
     loraReady = LoRa_Initialize();
@@ -2004,6 +2118,7 @@ int main(void)
     }
 
     joinBackoffMs = JOIN_BACKOFF_START_MS;
+    joinAttempts  = 0U;
 
     /* Prima transmisie se face imediat, nu dupa TX_INTERVAL_MS. */
     elapsedMs = TX_INTERVAL_MS;
@@ -2011,24 +2126,53 @@ int main(void)
     while (1)
     {
         /* =============================================================
-         * A. Cat timp nu suntem inrolati: incercam sa ne inrolam.
+         * A0. Repaus: nu emitem nimic si asteptam butonul 2.
+         *     Se ajunge aici la pornirea fara sesiune, la epuizarea
+         *     ferestrei de pairing si dupa un CMD_DOWN(RESET).
+         * ========================================================== */
+        if (deviceState == DEV_STATE_IDLE)
+        {
+            /* Fara __delay_ms() aici: ButtonPair_HeldLong() se intoarce
+             * imediat cand RC5 este LOW, deci bucla doar citeste portul in
+             * continuu. Placa este alimentata permanent (sleep-ul este
+             * dezactivat), asa ca o asteptare nu ar economisi nimic, in
+             * schimb inca o intarziere inline ar costa vreo 10 cuvinte. */
+            if (ButtonPair_HeldLong() != 0U)
+            {
+                deviceState   = DEV_STATE_JOINING;
+                joinBackoffMs = JOIN_BACKOFF_START_MS;
+                joinAttempts  = 0U;
+            }
+
+            continue;
+        }
+
+        /* =============================================================
+         * A. Fereastra de pairing deschisa de utilizator: incercam sa ne
+         *    inrolam de cel mult PAIRING_MAX_ATTEMPTS ori, apoi ne
+         *    intoarcem in repaus. Nu se mai incearca la nesfarsit:
+         *    hub-ul asculta doar in fereastra lui de 120 s.
          * ========================================================== */
         if (deviceState == DEV_STATE_JOINING)
         {
             /* F-013: niciun acces SPI daca MSSP-ul nu a fost deschis -
              * SPI1_ByteExchange asteapta SSP1IF la nesfarsit si ar bloca
-             * firmware-ul aici. */
+             * firmware-ul aici. Cu radioul mut nu are rost sa tinem
+             * fereastra deschisa, deci semnalam esecul si ne intoarcem in
+             * repaus in loc sa ne invartim degeaba. */
             if (loraReady == 0U)
             {
                 Led_ShowJoinFailure();
-                (void)Wait_Interruptible(joinBackoffMs);
+                LED2_LAT    = 0;
+                deviceState = DEV_STATE_IDLE;
                 continue;
             }
 
 #if ENABLE_PLAIN_TEMP
-            /* Bring-up: cat timp nu suntem inrolati, trimitem si
-             * temperatura in clar, ca sa se poata folosi testul 7 al
-             * hub-ului fara pairing. */
+            /* Bring-up: trimitem si temperatura in clar, ca sa se poata
+             * folosi testul 7 al hub-ului fara pairing. De cand
+             * inrolarea este manuala, asta se intampla doar in fereastra
+             * deschisa explicit de utilizator, nu la nesfarsit. */
             tempX100 = NTC_AdcToTempX100(ADC_ReadAveraged());
             Packet_BuildTemperature(tempPacket, tempX100, REASON_INTERVAL);
             (void)LoRa_SendBuffer(tempPacket, LORA_PACKET_LEN);
@@ -2050,7 +2194,22 @@ int main(void)
 
             Led_ShowJoinFailure();
 
-            (void)Wait_Interruptible(joinBackoffMs);
+            joinAttempts++;
+
+            if (joinAttempts >= PAIRING_MAX_ATTEMPTS)
+            {
+                /* Fereastra s-a inchis fara raspuns: inapoi in repaus,
+                 * LED2 stins. Utilizatorul reia cu inca trei secunde pe
+                 * butonul 2, dupa ce da 'pair' pe hub. */
+                LED2_LAT    = 0;
+                deviceState = DEV_STATE_IDLE;
+                continue;
+            }
+
+            /* LED2 clipeste cat asteptam: se vede de la distanta ca
+             * fereastra este inca deschisa. */
+            Wait_PairingBlink(joinBackoffMs);
+            LED2_LAT = 0;
 
             if (joinBackoffMs < JOIN_BACKOFF_MAX_MS)
             {
@@ -2068,15 +2227,27 @@ int main(void)
          * B. Inrolati: bucla normala de masurare si transmisie.
          * ========================================================== */
         forcedByButton = 0U;
+        rePair         = 0U;
 
         /*
          * Bucla de temporizare software (F-017: nu exista timer hardware
          * configurat). Se avanseaza cu pasi de TX_TICK_MS si se verifica
-         * butonul la fiecare pas, ca apasarea sa fie prinsa oricand, nu
+         * butoanele la fiecare pas, ca apasarea sa fie prinsa oricand, nu
          * doar la capatul intervalului.
          */
         while (elapsedMs < TX_INTERVAL_MS)
         {
+            /* Butonul 2 se asculta si aici, nu doar in repaus: altfel
+             * reinrolarea unui senzor deja inrolat ar cere scoaterea
+             * placii din priza. Se verifica primul, fiindca RC4 si RC5
+             * sunt linii separate si o apasare pe RC5 nu trebuie sa fie
+             * inghitita de iesirea din bucla pe RC4. */
+            if (ButtonPair_HeldLong() != 0U)
+            {
+                rePair = 1U;
+                break;
+            }
+
             if (Button_Pressed() != 0U)
             {
                 forcedByButton = 1U;
@@ -2085,6 +2256,23 @@ int main(void)
 
             __delay_ms(TX_TICK_MS);
             elapsedMs = (uint16_t)(elapsedMs + TX_TICK_MS);
+        }
+
+        /*
+         * Trei secunde pe butonul 2 la un senzor DEJA inrolat inseamna
+         * "vreau sa ma inrolez din nou": stergem sesiunea si deschidem
+         * fereastra de pairing. Este comod la mutarea placii pe alt hub,
+         * dar inseamna si ca trei secunde de apasare accidentala scot
+         * senzorul din retea - de aceea pragul este de trei secunde si nu
+         * de o atingere.
+         */
+        if (rePair != 0U)
+        {
+            Nvm_EraseSession();
+            deviceState   = DEV_STATE_JOINING;
+            joinBackoffMs = JOIN_BACKOFF_START_MS;
+            joinAttempts  = 0U;
+            continue;
         }
 
         /* --- Masuratoarea ------------------------------------------- */
@@ -2114,13 +2302,19 @@ int main(void)
                     if (command == CMD_TYPE_RESET)
                     {
                         /* Hub-ul ne-a scos din retea: stergem sesiunea si
-                         * ne intoarcem la pairing. Counter-ul din HEF
-                         * ramane - nu strica nimanui, iar la o inrolare
-                         * noua se porneste oricum de la zero. */
+                         * ne intoarcem in REPAUS, nu direct in pairing.
+                         * O dezinrolare este o decizie a hub-ului;
+                         * reintrarea in retea ramane o decizie a
+                         * utilizatorului, cu aceleasi trei secunde pe
+                         * butonul 2. Altfel un senzor tocmai scos ar
+                         * incepe imediat sa bata la usa inapoi.
+                         * Counter-ul din HEF ramane - nu strica
+                         * nimanui, iar la o inrolare noua se porneste
+                         * oricum de la zero. */
                         Nvm_EraseSession();
-                        deviceState = DEV_STATE_JOINING;
-                        joinBackoffMs = JOIN_BACKOFF_START_MS;
+                        deviceState = DEV_STATE_IDLE;
                         Led_ShowJoinFailure();
+                        LED2_LAT = 0;
                     }
                     else if (command == CMD_TYPE_ACK)
                     {

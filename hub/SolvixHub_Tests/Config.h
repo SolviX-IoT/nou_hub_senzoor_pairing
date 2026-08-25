@@ -131,6 +131,38 @@ extern byte HUB_MAC[6];
 //     hub. Se poate lasa pe 0 fara nicio consecinta functionala.
 #define PAIRING_SEND_ACK          1
 
+// Cat timp trebuie sa taca un senzor marcat cu `remove` inainte ca
+// dezinrolarea sa fie considerata CONFIRMATA si inregistrarea lui sa fie
+// stearsa din registru.
+//
+// Tacerea este singurul semnal pe care il avem ca senzorul a primit
+// CMD_DOWN(RESET): dupa el isi sterge sesiunea din HEF si intra in
+// repaus, de unde nu mai emite nimic (F-030). Cat timp inca se aude,
+// inseamna ca nu a primit comanda si i se retrimite (F-031).
+//
+// Senzorul transmite la TX_INTERVAL_MS = 5000 ms (senzor/main.c), deci
+// 20 s inseamna patru transmisii ratate la rand. Mai putin ar sterge
+// inregistrarea la prima coliziune radio, iar odata cu ea am pierde
+// cheia de sesiune - adica singurul mod de a-i mai trimite un RESET.
+// Mai mult doar intarzie reinrolarea.
+#define REMOVE_CONFIRM_SILENCE_MS 20000UL
+
+// 1 = dupa o dezinrolare CONFIRMATA, hub-ul redeschide singur fereastra
+//     de pairing, ca operatorul sa nu alerge inapoi la tastatura.
+// 0 = fereastra se deschide manual, cu `pair`.
+//
+// Fereastra se redeschide DOAR ca urmare a unei comenzi `remove` data de
+// un om, deci regula "un senzor nu se poate inrola pe furis, cand nimeni
+// nu se uita" ramane respectata. Nu este insa suficienta singura: dupa
+// RESET senzorul sta in DEV_STATE_IDLE si intra in inrolare numai daca i
+// se tine butonul 2 apasat trei secunde (F-030).
+#define PAIRING_REOPEN_AFTER_REMOVE 1
+
+// La cate pachete de la un DevAddr neinrolat se repeta sfatul de
+// recuperare. Un senzor ramas cu o cheie veche emite la fiecare 5 s;
+// sfatul la fiecare pachet ar ineca Serial-ul.
+#define PAIRING_UNKNOWN_HINT_EVERY 10
+
 // Cati senzori incap in registru. Fiecare inregistrare are ~40 de octeti,
 // deci limita este data de bunul simt, nu de memorie.
 #define REGISTRY_MAX_DEVICES      8

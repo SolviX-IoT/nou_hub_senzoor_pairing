@@ -36,6 +36,11 @@ namespace TestPairing {
   static unsigned long s_dataBadMic = 0;
   static unsigned long s_dataUnknown = 0;
   static unsigned long s_foreign = 0;
+  static unsigned long s_removalsConfirmed = 0;
+
+  // Cate pachete de la adrese neinrolate au trecut de la ultimul sfat de
+  // recuperare afisat.
+  static unsigned long s_unknownSeen = 0;
 
   // Cate pachete de date au venit de la ultima salvare in NVS.
   static unsigned int s_sinceSave = 0;
@@ -86,6 +91,86 @@ namespace TestPairing {
   }
 
   // -------------------------------------------------------------------
+  // Dezinrolarea confirmata (F-031)
+  // -------------------------------------------------------------------
+
+  // Trimite un RESET catre un device marcat si porneste (sau reporneste)
+  // ceasul de tacere. Apelantul a verificat deja ca device-ul este al
+  // nostru: MIC-ul pachetului care a declansat retrimiterea a trecut.
+  static void sendRemovalReset(DeviceRecord& device);
+
+  /*
+   * Confirmarea dezinrolarii, chemata din tick() - deci fara delay() si
+   * fara vreun timer nou.
+   *
+   * Inregistrarea unui device marcat NU se sterge la trimiterea
+   * RESET-ului, ci abia cand senzorul tace: cat timp se aude, inseamna ca
+   * nu a primit comanda si mai are nevoie de una. Stergerea imediata era
+   * bug-ul F-031 - un singur downlink pierdut lasa hub-ul fara cheie si
+   * senzorul in retea pentru totdeauna.
+   */
+  static void servicePendingRemovals() {
+    uint8_t i = 0;
+
+    while (i < DeviceRegistry::count()) {
+      DeviceRecord* device = DeviceRegistry::at(i);
+
+      if (device == nullptr || !device->pendingReset) {
+        i++;
+        continue;
+      }
+
+      // resetSentMs == 0 inseamna ca in ACEASTA sesiune nu i-am trimis
+      // inca niciun RESET: fie tocmai a fost marcat, fie hub-ul s-a
+      // repornit in mijlocul dezinrolarii (load() pune campul pe 0).
+      // Tacerea nu dovedeste nimic atunci - nu avem de unde sti daca
+      // senzorul a auzit vreodata comanda -, deci asteptam un pachet de
+      // la el, care va declansa o retrimitere si va porni ceasul.
+      if (device->resetSentMs == 0) {
+        i++;
+        continue;
+      }
+
+      if ((unsigned long)(millis() - device->resetSentMs) < REMOVE_CONFIRM_SILENCE_MS) {
+        i++;
+        continue;
+      }
+
+      // Copiem ce ne trebuie INAINTE de stergere: removeByEui muta
+      // ultimul element peste cel sters, deci "device" devine invalid.
+      uint8_t  eui[DEV_EUI_LEN];
+      memcpy(eui, device->devEui, DEV_EUI_LEN);
+      uint16_t attempts = device->resetAttempts;
+
+      DeviceRegistry::removeByEui(eui);
+      s_sinceSave = 0;
+      s_removalsConfirmed++;
+
+      Serial.println();
+      Serial.print(F(">> DEZINROLARE CONFIRMATA: "));
+      SensorPacketCodec::printEui(eui);
+      Serial.print(F(" a tacut "));
+      Serial.print(REMOVE_CONFIRM_SILENCE_MS / 1000UL);
+      Serial.print(F(" s dupa ultimul RESET (trimise: "));
+      Serial.print(attempts);
+      Serial.println(F(")."));
+      Serial.println(F(">> Sters din registru. Cheia lui de sesiune nu mai este valida nicaieri:"));
+      Serial.println(F(">> senzorul si-a sters-o din HEF, hub-ul a sters inregistrarea."));
+      Serial.println(F(">> Ca sa il aduci inapoi: 'pair' pe hub SI trei secunde pe butonul 2 al"));
+      Serial.println(F(">> senzorului. Fara apasarea aceea senzorul ramane in repaus si nu cere"));
+      Serial.println(F(">> inrolarea singur."));
+
+#if PAIRING_REOPEN_AFTER_REMOVE
+      // Fereastra se redeschide ca sa nu fie nevoie de inca un `pair`.
+      // Nu inlocuieste apasarea de pe senzor, doar o asteapta.
+      enterPairingMode();
+#endif
+
+      // Nu incrementam i: pe pozitia lui a fost mutat ultimul element.
+    }
+  }
+
+  // -------------------------------------------------------------------
   // Trimiterea unui downlink
   // -------------------------------------------------------------------
 
@@ -101,6 +186,13 @@ namespace TestPairing {
     Serial.print(F(" trimis (counter "));
     Serial.print(device.downCounter);
     Serial.println(F(")"));
+  }
+
+  static void sendRemovalReset(DeviceRecord& device) {
+    device.downCounter++;
+    device.resetAttempts++;
+    device.resetSentMs = millis();
+    sendCommand(device, CMD_TYPE_RESET);
   }
 
   // -------------------------------------------------------------------
@@ -219,6 +311,18 @@ namespace TestPairing {
       if (data.devAddr < 0x10) Serial.print('0');
       Serial.print(data.devAddr, HEX);
       Serial.println(F(" nu este inrolat."));
+
+      // Sfat de recuperare, dar rar: un senzor ramas cu o cheie veche
+      // emite la fiecare 5 s si ar ineca Serial-ul. Hub-ul NU mai are
+      // cheia lui, deci nu il mai poate opri prin radio - de asta
+      // stergerea nu se mai face la prima trimitere de RESET (F-031).
+      s_unknownSeen++;
+      if (((s_unknownSeen - 1) % PAIRING_UNKNOWN_HINT_EVERY) == 0) {
+        Serial.println(F("       Senzorul are o cheie de sesiune pe care hub-ul nu o mai are, deci"));
+        Serial.println(F("       nu mai poate fi oprit prin comenzi radio. Nici oprirea alimentarii"));
+        Serial.println(F("       nu ajuta: cheia sta in HEF. Recuperare: tine butonul 2 apasat trei"));
+        Serial.println(F("       secunde pe senzor, apoi 'pair' pe hub."));
+      }
       return;
     }
 
@@ -238,6 +342,29 @@ namespace TestPairing {
     if (!HubCrypto::macVerify(device->sessKey, buffer, DATA_ENC_MIC_INPUT_LEN, data.mic)) {
       s_dataBadMic++;
       Serial.println(F("[DATA] RESPINS: MIC gresit (cheie de sesiune diferita sau pachet modificat)."));
+      return;
+    }
+
+    // Dezinrolare in curs. Faptul ca senzorul inca emite este dovada ca
+    // nu a primit RESET-ul precedent, deci i se retrimite. Pachetul NU se
+    // decodeaza si nu se numara ca date valide: senzorul este pe iesire,
+    // masuratoarea lui nu mai intereseaza pe nimeni. MIC-ul a trecut deja,
+    // deci stim sigur ca el este (F-031).
+    if (device->pendingReset) {
+      // Contorul se avanseaza si aici, altfel un pachet retrimis de
+      // senzor ar trece de anti-replay dupa ce dezinrolarea se incheie.
+      device->lastFrameCounterUp = data.frameCounter;
+      device->hasUplink = true;
+      device->lastSeenMs = millis();
+
+      Serial.print(F("[DATA] DevAddr 0x"));
+      if (data.devAddr < 0x10) Serial.print('0');
+      Serial.print(data.devAddr, HEX);
+      Serial.print(F(" - dezinrolare in curs, inca se aude. Retrimit RESET (incercarea "));
+      Serial.print((unsigned int)(device->resetAttempts + 1));
+      Serial.println(F(")."));
+
+      sendRemovalReset(*device);
       return;
     }
 
@@ -288,25 +415,8 @@ namespace TestPairing {
     Serial.print(snr, 1);
     Serial.println(F(" dB"));
 
-    // Downlink: RESET are prioritate fata de ACK.
-    if (device->pendingReset) {
-      device->downCounter++;
-      sendCommand(*device, CMD_TYPE_RESET);
-
-      // Copiem DevEUI inainte de stergere: removeByEui muta ultimul
-      // element peste cel sters, deci "device" nu mai este valid dupa.
-      uint8_t eui[DEV_EUI_LEN];
-      memcpy(eui, device->devEui, DEV_EUI_LEN);
-
-      DeviceRegistry::removeByEui(eui);
-      s_sinceSave = 0;
-
-      Serial.print(F("      Device-ul "));
-      SensorPacketCodec::printEui(eui);
-      Serial.println(F(" a fost scos din registru. Pachetele lui urmatoare vor fi ignorate."));
-      return;
-    }
-
+    // Dezinrolarea a fost tratata mai sus, inainte de decodare: aici
+    // ajung doar pachetele unui device sanatos.
 #if PAIRING_SEND_ACK
     device->downCounter++;
     sendCommand(*device, CMD_TYPE_ACK);
@@ -350,6 +460,7 @@ namespace TestPairing {
 
     Leds::service();                   // stinge pulsul precedent la scadenta
     servicePairingWindow();
+    servicePendingRemovals();          // confirma dezinrolarile prin tacere
 
     uint8_t buffer[RX_BUFFER_SIZE];
     int   length = 0;
@@ -420,6 +531,7 @@ namespace TestPairing {
     Serial.print(F("  MIC gresit         : ")); Serial.println(s_dataBadMic);
     Serial.print(F("  adresa necunoscuta : ")); Serial.println(s_dataUnknown);
     Serial.print(F("  pachete straine    : ")); Serial.println(s_foreign);
+    Serial.print(F("  dezinrolari confirmate: ")); Serial.println(s_removalsConfirmed);
     Serial.print(F("  mod pairing        : "));
     Serial.println(s_pairingMode ? F("ACTIV") : F("inchis"));
   }

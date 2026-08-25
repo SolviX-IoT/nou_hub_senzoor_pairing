@@ -269,19 +269,53 @@ static void commandRemove(const String& argument) {
     Serial.print(F("Sters imediat din registru: "));
     SensorPacketCodec::printEui(eui);
     Serial.println();
-    Serial.println(F("ATENTIE: senzorul nu a fost anuntat. El va continua sa emita cu vechea"));
-    Serial.println(F("cheie pana la o stergere manuala a HEF-ului sau pana la un 'remove' normal."));
+    Serial.println(F("ATENTIE: senzorul NU a fost anuntat, deci pastreaza cheia de sesiune si va"));
+    Serial.println(F("continua sa emita. Hub-ul ii va vedea pachetele ca DATA_ENC de la o adresa"));
+    Serial.println(F("necunoscuta si NU mai are cu ce sa il opreasca: cheia tocmai a fost stearsa"));
+    Serial.println(F("de aici. Oprirea si repornirea alimentarii nu ajuta - cheia sta in HEF."));
+    Serial.println(F("Curatarea corecta: tine butonul 2 apasat trei secunde pe senzor (revine in"));
+    Serial.println(F("repaus si isi sterge sesiunea), sau, data viitoare, 'remove <DevEUI>' fara"));
+    Serial.println(F("'force' cat timp senzorul inca emite."));
     return;
   }
 
-  device->pendingReset = true;
+  // Un device care nu a trimis nimic de la inrolare nu are cum sa
+  // primeasca RESET-ul: comanda calatoreste in fereastra de receptie pe
+  // care senzorul o deschide DUPA fiecare pachet al lui. Daca l-am marca
+  // oricum, inregistrarea ar ramane blocata in registru la nesfarsit, cu
+  // adresa ocupata, asteptand un pachet care poate nu vine niciodata.
+  // Nu il stergem noi in tacere: asta ar fi exact un `force` nedeclarat,
+  // iar diferenta dintre cele doua comenzi este tot rostul lor. Decizia
+  // ramane a omului, care stie daca senzorul este pornit sau nu.
+  if (!device->hasUplink) {
+    Serial.print(F("Device-ul "));
+    SensorPacketCodec::printEui(eui);
+    Serial.println(F(" nu a trimis niciun pachet de la inrolare."));
+    Serial.println(F("Probabil este oprit sau in afara razei. CMD_DOWN(RESET) pleaca doar ca"));
+    Serial.println(F("raspuns la un pachet al lui, deci o dezinrolare curata este imposibila acum."));
+    Serial.println(F("Ai doua variante:"));
+    Serial.println(F("  - porneste senzorul si repeta 'remove <DevEUI>' cat timp emite (curat), sau"));
+    Serial.println(F("  - 'remove <DevEUI> force' ca sa il stergi doar local; senzorul pastreaza"));
+    Serial.println(F("    cheia si va trebui recuperat de la butonul 2."));
+    return;
+  }
+
+  device->pendingReset  = true;
+  device->resetAttempts = 0;
+  device->resetSentMs   = 0;
   DeviceRegistry::save();
 
   Serial.print(F("Marcat pentru dezinrolare: "));
   SensorPacketCodec::printEui(eui);
   Serial.println();
-  Serial.println(F("La primul lui pachet primeste CMD_DOWN(RESET), apoi dispare din registru."));
-  Serial.println(F("Pana atunci, pachetele lui nu mai sunt afisate. Testul 8 trebuie sa ruleze."));
+  Serial.println(F("La FIECARE pachet al lui primeste cate un CMD_DOWN(RESET); se insista cat"));
+  Serial.println(F("timp se aude, fiindca un senzor care inca emite nu a primit comanda."));
+  Serial.print(F("Dezinrolarea se confirma abia dupa ce senzorul tace "));
+  Serial.print(REMOVE_CONFIRM_SILENCE_MS / 1000UL);
+  Serial.println(F(" s - abia atunci dispare"));
+  Serial.println(F("din registru, si abia atunci hub-ul renunta la cheia lui."));
+  Serial.println(F("Pana atunci pachetele lui nu mai sunt afisate ca masuratori."));
+  Serial.println(F("Testul 8 trebuie sa ruleze, altfel nu are cine sa trimita RESET-ul."));
 }
 
 // Intoarce true daca linia a fost o comanda cunoscuta.

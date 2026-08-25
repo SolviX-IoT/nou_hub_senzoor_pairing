@@ -65,9 +65,22 @@ struct DeviceRecord {
   // Cate pachete de date valide au venit de la acest senzor.
   uint32_t packets;
 
-  // Marcat de comanda `remove`: device-ul mai este pastrat doar cat sa
-  // primeasca un CMD_DOWN de tip RESET, apoi dispare din registru.
+  // Marcat de comanda `remove`. Inregistrarea NU se sterge la trimiterea
+  // primului RESET: se pastreaza, cu cheia intacta, cat timp senzorul
+  // inca se aude, ca sa i se poata retrimite comanda (F-031).
   bool     pendingReset;
+
+  // Cate CMD_DOWN(RESET) i-au fost trimise de la comanda `remove`.
+  // Fiecare pachet primit de la un device marcat inseamna ca nu a primit
+  // comanda precedenta, deci se mai incearca o data.
+  uint16_t resetAttempts;
+
+  // millis() la ultimul RESET trimis; 0 = niciunul in ACEASTA sesiune.
+  // Ca si lastSeenMs, este relativ la pornirea hub-ului si se pune pe 0
+  // la incarcarea din NVS: o valoare veche ar face ca dezinrolarea sa
+  // para confirmata imediat dupa repornire, fara ca vreun RESET sa fi
+  // plecat efectiv.
+  uint32_t resetSentMs;
 
   // millis() la ultimul pachet valid. NU se pastreaza peste repornire -
   // este relativ la pornirea hub-ului si se pune pe 0 la incarcare.

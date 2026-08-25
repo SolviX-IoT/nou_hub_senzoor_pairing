@@ -57,8 +57,8 @@ Se scriu ca text, nu ca cifre, si merg si in timpul unui test:
 | `pair` | Deschide fereastra de inrolare (porneste testul 8 daca nu ruleaza). LED 2 clipeste cat timp fereastra e deschisa. |
 | `list` | Senzorii inrolati, din registrul salvat in NVS |
 | `provisioned` | Senzorii care **au voie** sa se inroleze (lista din `Config.h`) |
-| `remove <DevEUI>` | Il scoate din retea: la primul lui pachet primeste `CMD_DOWN(RESET)`, apoi dispare din registru |
-| `remove <DevEUI> force` | Il sterge imediat din registru, fara sa il anunte |
+| `remove <DevEUI>` | Il scoate din retea. Primeste `CMD_DOWN(RESET)` la **fiecare** pachet al lui, iar inregistrarea dispare abia dupa ce senzorul **tace** `REMOVE_CONFIRM_SILENCE_MS` — tacerea e dovada ca a primit comanda (F-031). Refuzat daca senzorul nu a trimis niciodata nimic. |
+| `remove <DevEUI> force` | Il sterge imediat din registru, fara sa il anunte. Senzorul pastreaza cheia si continua sa emita; recuperarea se face de la butonul 2 al senzorului |
 | `stats` | Contoarele testului de pairing |
 | `help` | Lista aceasta |
 
@@ -88,6 +88,45 @@ niciun test sau cand ruleaza chiar testul 8.
 Un senzor **neprovizionat** (DevEUI absent din `Config.h`) sau cu
 `AppKey` gresita este refuzat cu mesaj explicit. Un `JOIN_REQ` sau un
 `DATA_ENC` rejucat este respins si numarat separat in `stats`.
+
+**Senzorul nu se inroleaza singur.** Fara sesiune sta in repaus si tace;
+fereastra lui se deschide tinand **butonul 2 (RC5) apasat trei secunde**.
+Deci pasul 1 si pasul 2 de mai sus cer amandoua o interventie umana: `pair`
+pe hub *si* apasarea de pe senzor.
+
+## Cum decurge o dezinrolare
+
+Un downlink are o singura sansa: senzorul asculta doar 600 ms dupa fiecare
+transmisie a lui. De aceea `remove` **nu** crede ca a reusit din prima
+(F-031):
+
+1. `remove <DevEUI>` doar **marcheaza** device-ul. Inregistrarea si cheia
+   raman pe loc.
+2. La **fiecare** pachet primit de la el, hub-ul retrimite
+   `CMD_DOWN(RESET)` si numara incercarea. Un senzor care inca emite este
+   dovada ca nu a primit comanda. Pachetele lui nu se mai afiseaza ca
+   masuratori.
+3. Cand senzorul **tace** `REMOVE_CONFIRM_SILENCE_MS`, dezinrolarea este
+   confirmata: el a primit RESET-ul, si-a sters sesiunea din HEF si a
+   intrat in repaus. Abia acum inregistrarea dispare din registru si
+   hub-ul renunta la cheie.
+4. Cu `PAIRING_REOPEN_AFTER_REMOVE = 1`, fereastra de pairing se
+   redeschide singura. Pentru reinrolare mai este nevoie si de cele trei
+   secunde pe butonul 2 al senzorului.
+
+`list` arata device-urile aflate in acest proces, cu numarul de RESET-uri
+trimise si cat a trecut de la ultimul.
+
+**`remove` pe un senzor oprit** este refuzat: fara pachete de la el,
+RESET-ul nu are cum sa plece, iar marcarea ar bloca inregistrarea la
+nesfarsit. Ori porneste senzorul, ori foloseste `force`.
+
+**Un senzor ramas cu o cheie veche** (dupa un `force`, sau dupa o
+dezinrolare esuata cu firmware-ul dinainte de F-031) emite pachete pe care
+hub-ul le vede ca `DevAddr` neinrolat si pe care nu le mai poate opri prin
+radio — nu mai are cheia. Se recupereaza doar de pe senzor: butonul 2
+apasat trei secunde. Hub-ul aminteste asta la fiecare
+`PAIRING_UNKNOWN_HINT_EVERY` pachete de acest fel.
 
 ## Ce se pastreaza peste repornire
 
@@ -179,6 +218,19 @@ totul pare "corect" dar nimic nu se valideaza:
 |---------------------|----------------------|
 | `PAIRING_ENCRYPT_PAYLOAD` | `PAIRING_ENCRYPT_PAYLOAD` |
 | perechea din `PROVISIONED_DEVICES_INIT` | `PROVISION_DEV_EUI` + `PROVISION_APP_KEY` |
+
+### Constantele de pairing din `Config.h`
+
+| Constanta | Implicit | Ce face |
+|-----------|----------|---------|
+| `PAIRING_MODE_TIMEOUT_MS` | 120000 | Cat sta deschisa fereastra de inrolare |
+| `PAIRING_BLINK_MS` | 250 | Ritmul de clipire al LED 2 in mod pairing |
+| `PAIRING_SEND_ACK` | 1 | Trimite `CMD_DOWN(ACK)` dupa fiecare pachet valid |
+| `REMOVE_CONFIRM_SILENCE_MS` | 20000 | Cat trebuie sa taca un senzor marcat ca dezinrolarea sa fie confirmata. 4 x `TX_INTERVAL_MS`, ca o coliziune izolata sa nu para tacere |
+| `PAIRING_REOPEN_AFTER_REMOVE` | 1 | Redeschide fereastra de pairing dupa o dezinrolare confirmata. Doar in urma unei comenzi date de om, deci nimeni nu se inroleaza pe furis |
+| `PAIRING_UNKNOWN_HINT_EVERY` | 10 | La cate pachete de la un `DevAddr` neinrolat se repeta sfatul de recuperare |
+| `REGISTRY_MAX_DEVICES` | 8 | Cati senzori incap in registru |
+| `REGISTRY_SAVE_EVERY` | 20 | La cate pachete se rescrie registrul in NVS |
 
 Formatul tuturor pachetelor este descris in
 [SensorPacket.h](SensorPacket.h) si oglindit in sectiunea 4 din

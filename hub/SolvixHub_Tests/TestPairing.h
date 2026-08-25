@@ -16,9 +16,16 @@
        valid. Payload-ul decriptat este dat lui SensorPacketCodec::decode(),
        adica exact aceluiasi cod care serveste testul 7.
 
-    3. DEZINROLARE. Un device marcat de comanda `remove` primeste, la
-       primul contact, un CMD_DOWN de tip RESET, dupa care este sters din
-       registru. Senzorul isi sterge cheia din HEF si revine la pairing.
+    3. DEZINROLARE CONFIRMATA. Un device marcat de comanda `remove`
+       primeste un CMD_DOWN de tip RESET la FIECARE pachet al lui, si
+       inregistrarea NU se sterge inca. Senzorul care inca emite este
+       dovada ca nu a primit comanda; senzorul care tace este dovada ca
+       a primit-o, fiindca dupa RESET isi sterge cheia din HEF si intra
+       in repaus. Abia dupa REMOVE_CONFIRM_SILENCE_MS de tacere
+       inregistrarea dispare din registru. Varianta veche stergea la
+       prima trimitere si, daca acel unic downlink se pierdea, hub-ul
+       ramanea fara cheie si nu mai putea opri senzorul niciodata
+       (F-031).
 
   DIFERENTA FATA DE TESTUL 7: acolo se asculta pachetul de temperatura in
   CLAR, fara nicio identitate - orice emitator cu aceiasi parametri radio

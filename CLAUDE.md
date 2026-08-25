@@ -516,7 +516,7 @@ interpretat gresit octet cu octet.
 | `Leds.h`, `Leds.cpp` | Cele doua LED-uri (D22/D21). `set()` pentru stare, `pulse()` pentru evenimente, `service()` fara `delay()`. |
 | `SensorPacket.h`, `SensorPacket.cpp` | **Oglinda protocolului din `senzor/main.c`**: constantele tuturor tipurilor, `decode()`/`print()`/`printRaw()` pentru temperatura, plus `messageType()`, `parseJoinRequest()`, `parseEncryptedData()`, `buildJoinAccept()`, `buildCommand()`, `printEui()`. |
 | `HubCrypto.h`, `HubCrypto.cpp` | **NOU.** XTEA-128 (bloc de 8 octeti), CBC-MAC-XTEA, XTEA-CTR, `buildDataIv()`, `buildJoinIv()`, `deriveSessionKey()`. **Nu depinde de nicio biblioteca** (F-024). Numele **nu** este `Crypto.h`, ca sa nu ascunda antetul unei biblioteci cu acel nume (F-021). |
-| `DeviceRegistry.h`, `DeviceRegistry.cpp` | **NOU.** Registrul senzorilor inrolati, salvat in NVS prin `Preferences`; cautare dupa EUI/adresa, alocare de `DevAddr`, lista de provisioning din `Config.h`. |
+| `DeviceRegistry.h`, `DeviceRegistry.cpp` | **NOU.** Registrul senzorilor inrolati, salvat in NVS prin `Preferences`; cautare dupa EUI/adresa, alocare de `DevAddr`, lista de provisioning din `Config.h`. `DeviceRecord` tine si starea dezinrolarii in curs (`pendingReset`, `resetAttempts`, `resetSentMs`); `resetSentMs`, ca si `lastSeenMs`, este relativ la pornirea hub-ului si se pune pe 0 la incarcarea din NVS (F-031). |
 | `EthernetLink.h`, `EthernetLink.cpp` | Invelis peste EthernetENC: DHCP cu timeout, `printStatus()`, cerere HTTP GET. Aici este definit `HUB_MAC`. |
 | `TestButtons.*` | Citeste GPIO34/35 si numara tranzitiile, ca sa se vada liniile flotante. |
 | `TestEncSpi.*` | Diagnostic SPI de nivel jos pe ENC28J60; verifica `EREVID`. |
@@ -525,7 +525,7 @@ interpretat gresit octet cu octet.
 | `TestLoRaRx.*` | Receptie LoRa cu RSSI si SNR. |
 | `TestCoexistence.*` | Ambele module active alternativ pe acelasi bus. LoRa se initializeaza **primul**. |
 | `TestSensorRx.*` | **Testul 7:** asculta pachetul de temperatura **in clar**. Ramane util la bring-up, cu `ENABLE_PLAIN_TEMP = 1` pe senzor. |
-| `TestPairing.*` | **NOU — testul 8:** fereastra de pairing cu timeout, tratarea `JOIN_REQ` (provisioning + MIC + anti-replay + alocare de adresa + `JOIN_ACCEPT`), tratarea `DATA_ENC` (adresa + counter + MIC + decriptare + `decode()`), trimiterea `CMD_DOWN` (ACK/RESET) si contoarele pentru `stats`. |
+| `TestPairing.*` | **NOU — testul 8:** fereastra de pairing cu timeout, tratarea `JOIN_REQ` (provisioning + MIC + anti-replay + alocare de adresa + `JOIN_ACCEPT`), tratarea `DATA_ENC` (adresa + counter + MIC + decriptare + `decode()`), trimiterea `CMD_DOWN` (ACK/RESET) si contoarele pentru `stats`. Tot aici sta **dezinrolarea confirmata** (F-031): `sendRemovalReset()` retrimite `RESET` la fiecare pachet al unui device marcat, iar `servicePendingRemovals()`, chemata din `tick()`, sterge inregistrarea abia dupa `REMOVE_CONFIRM_SILENCE_MS` de tacere. |
 | `README.md` | Instructiuni de utilizare, comenzile de pairing, tabelul SPI si notele hardware. |
 
 ---
@@ -799,6 +799,52 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
   se pune la socoteala ca o functie de ~25 de cuvinte. Cand ai nevoie de
   temporizare in doua locuri, imparte acelasi pas, nu copia randul.
 
+### F-031 — `remove` era "trimite si uita": un RESET pierdut lasa senzorul blocat in retea pe veci
+- **Simptom:** dupa `remove <DevEUI>`, senzorul continua sa emita si nu
+  mai poate fi oprit din hub. Pe Serial curge la nesfarsit `[DATA]
+  IGNORAT: DevAddr 0x.. nu este inrolat.`, iar `remove <DevEUI>` raspunde
+  `Nu exista niciun device inrolat`, fiindca device-ul nu mai este in
+  registru. Singura iesire ramane fizica: trei secunde pe butonul 2 al
+  senzorului. Cel putin o placa a ajuns in starea asta.
+- **Cauza:** `handleEncryptedData()` trimitea `CMD_DOWN(RESET)` **o
+  singura data** si stergea imediat inregistrarea cu `removeByEui()`, fara
+  nicio confirmare. Downlink-ul are o singura sansa: senzorul asculta doar
+  `DOWNLINK_WINDOW_MS` = 600 ms dupa fiecare transmisie. Daca acel pachet
+  se pierde — coliziune, fereastra ratata, orice — senzorul isi pastreaza
+  `SessKey` si continua sa emita, iar hub-ul tocmai a aruncat singura
+  copie a cheii cu care ar fi putut compune un alt `CMD_DOWN` valid pentru
+  el. Dezinrolarea era presupusa, nu verificata.
+- **Fix — stergerea se face pe dovada, nu pe speranta:**
+  1. inregistrarea **nu** se mai sterge la trimiterea RESET-ului;
+  2. la **fiecare** pachet primit de la un device marcat se retrimite
+     `RESET`, cu `downCounter` si `resetAttempts` incrementate — un senzor
+     care inca emite este dovada ca nu a primit comanda; pachetul nu se
+     mai decodeaza si nu se mai numara ca date valide;
+  3. inregistrarea dispare abia cand senzorul **tace**
+     `REMOVE_CONFIRM_SILENCE_MS` (20 s = 4 intervale de transmisie) de la
+     ultimul RESET — tacerea este exact semnalul ca a ajuns in
+     `DEV_STATE_IDLE` (F-030). Verificarea ruleaza in `tick()`, prin
+     `servicePendingRemovals()`, fara `delay()` si fara timer nou;
+  4. `remove` pe un device care nu a trimis niciodata nimic
+     (`hasUplink` fals) este refuzat, cu explicatie: RESET-ul nu are cum
+     sa plece daca senzorul nu vorbeste, iar marcarea ar bloca
+     inregistrarea la nesfarsit. Operatorul alege intre a porni senzorul
+     si `force`;
+  5. cand sosesc pachete de la un `DevAddr` neinrolat, hub-ul spune — rar,
+     o data la `PAIRING_UNKNOWN_HINT_EVERY` pachete — cum se recupereaza
+     senzorul, pentru placile ramase blocate de varianta veche.
+- **Capcana prinsa in timpul fixului:** `resetSentMs` trebuie pus pe **0**
+  la incarcarea din NVS, exact ca `lastSeenMs`. Amandoua sunt relative la
+  `millis()`, deci la pornirea hub-ului o valoare veche minus un `millis()`
+  mic ar da o diferenta uriasa si dezinrolarea ar aparea drept confirmata
+  instantaneu, fara ca vreun RESET sa fi plecat. Zero inseamna acum
+  "niciun RESET in sesiunea asta", iar confirmarea prin tacere refuza sa
+  se pronunte in acel caz si asteapta un pachet.
+- **De retinut:** un downlink fara confirmare nu este o comanda, este o
+  speranta. Cand hub-ul arunca starea de care depinde reincercarea (aici:
+  cheia), pierderea unui singur pachet devine definitiva. `DeviceRecord`
+  s-a modificat, deci `REGISTRY_BLOB_VERSION` a trecut pe **2**.
+
 ---
 
 ## 10. Reguli de lucru in acest proiect
@@ -858,7 +904,9 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
 | Un `JOIN_REQ` rejucat e respins | verificarea `lastDevNonce` |
 | Un `DATA_ENC` rejucat e respins | verificarea `frameCounter > lastFrameCounterUp` |
 | Dupa reset de alimentare, senzorul reia comunicarea fara re-pairing si fara reutilizarea unui counter | HEF + saltul cu `FCNT_CHECKPOINT_EVERY` (sectiunea 7.1) |
-| `remove <DevEUI>` + `RESET` dezinroleaza curat | `commandRemove()` + `pendingReset` in `handleEncryptedData()` |
+| `remove <DevEUI>` + `RESET` dezinroleaza curat, **si dezinrolarea este confirmata, nu presupusa** | `commandRemove()` marcheaza; `handleEncryptedData()` retrimite `RESET` la fiecare pachet al device-ului marcat; `servicePendingRemovals()` sterge inregistrarea abia dupa `REMOVE_CONFIRM_SILENCE_MS` de tacere (F-031) |
+| Un `RESET` pierdut nu lasa senzorul blocat in retea | inregistrarea si cheia se pastreaza cat timp senzorul se aude, deci hub-ul poate reincerca oricat (F-031) |
+| `remove` pe un senzor oprit nu blocheaza registrul | `commandRemove()` refuza marcarea daca `hasUplink` este fals si trimite operatorul la `force` |
 | Registrul hub-ului persista peste repornire | `DeviceRegistry` pe NVS |
 | Senzorul se inroleaza **doar la cererea explicita a utilizatorului** | `DEV_STATE_IDLE` este starea implicita in `senzor/main.c`; fereastra se deschide numai din `ButtonPair_HeldLong()` (butonul 2 tinut ~3 s) si se inchide dupa `PAIRING_MAX_ATTEMPTS` incercari |
 | Dupa `CMD_DOWN(RESET)` senzorul nu se re-inroleaza singur | ramura `CMD_TYPE_RESET` trece in `DEV_STATE_IDLE`, nu in `DEV_STATE_JOINING` |

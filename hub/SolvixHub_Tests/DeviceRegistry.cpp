@@ -13,7 +13,9 @@ namespace DeviceRegistry {
   // Se schimba ori de cate ori se modifica structura DeviceRecord. Un
   // blob salvat cu alta versiune este ignorat si registrul porneste gol,
   // in loc sa fie interpretat gresit octet cu octet.
-  static const uint8_t REGISTRY_BLOB_VERSION = 1;
+  // v2: DeviceRecord a primit resetAttempts si resetSentMs, pentru
+  // dezinrolarea confirmata din F-031.
+  static const uint8_t REGISTRY_BLOB_VERSION = 2;
 
   static const char* KEY_VERSION = "ver";
   static const char* KEY_COUNT   = "count";
@@ -99,6 +101,8 @@ namespace DeviceRegistry {
     record->lastDevNonce = devNonce;
     record->packets = 0;
     record->pendingReset = false;
+    record->resetAttempts = 0;
+    record->resetSentMs = 0;
     record->lastSeenMs = millis();
 
     save();
@@ -158,10 +162,17 @@ namespace DeviceRegistry {
 
     s_count = stored;
 
-    // lastSeenMs este relativ la pornirea hub-ului: valoarea salvata nu
-    // mai inseamna nimic dupa repornire.
+    // lastSeenMs si resetSentMs sunt relative la pornirea hub-ului:
+    // valorile salvate nu mai inseamna nimic dupa repornire. Pentru
+    // resetSentMs asta nu este doar curatenie: 0 inseamna "niciun RESET
+    // trimis in sesiunea asta", iar verificarea de tacere refuza sa
+    // confirme o dezinrolare pe baza unui RESET pe care nu l-a trimis ea
+    // (F-031). Fara zeroizare, millis() mic minus o valoare veche mare ar
+    // da o diferenta uriasa si device-ul ar disparea din registru imediat
+    // dupa fiecare repornire a hub-ului.
     for (uint8_t i = 0; i < s_count; i++) {
       s_devices[i].lastSeenMs = 0;
+      s_devices[i].resetSentMs = 0;
     }
 
     return true;
@@ -214,7 +225,16 @@ namespace DeviceRegistry {
       }
 
       if (d.pendingReset) {
-        Serial.print(F("  [ASTEAPTA RESET]"));
+        Serial.print(F("  [DEZINROLARE IN CURS, RESET-uri trimise: "));
+        Serial.print(d.resetAttempts);
+        if (d.resetSentMs == 0) {
+          Serial.print(F(", niciunul in sesiunea asta - astept un pachet"));
+        } else {
+          Serial.print(F(", ultimul acum "));
+          Serial.print((millis() - d.resetSentMs) / 1000UL);
+          Serial.print(F(" s"));
+        }
+        Serial.print(F("]"));
       }
 
       Serial.println();

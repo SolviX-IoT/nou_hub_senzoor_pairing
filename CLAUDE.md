@@ -109,7 +109,7 @@ retea LoRa "de manual".
    | | flash (words) | RAM (octeti) |
    |---|---|---|
    | PIC16LF1508 are | 4096 (3968 utilizabili, HEF rezervat) | 256 |
-   | firmware-ul actual | **3936** (99.2%) | **233** (91.0%) |
+   | firmware-ul actual | **3921** (98.8%) | **233** (91.0%) |
 
    Cifra de 3761 de cuvinte / 250 de octeti din versiunile anterioare ale
    acestui fisier era masuratoarea de dinainte de F-029 (care a mutat
@@ -175,7 +175,7 @@ identice cu cele din `teste-sistemcomplet/`.
 | **RC2** | **NTC 10K 3950** -> **AN6** | intrare analogica | `ANSELC=0x06` (ANSC1+ANSC2), `TRISC2=1` | `pins.c` |
 | **RC4** | **Buton 1** (activ HIGH, pull-down extern) | intrare digitala | `TRISC4=1` | `main.c` |
 | **RC5** | **Buton 2** — **tinut ~3 s deschide pairing-ul** (activ HIGH, pull-down extern) | intrare digitala | `TRISC5=1` | `main.c`, `ButtonPair_HeldLong()` |
-| **RC3** | **LED 1** — transmisie de date | iesire | `ANSC3=0`, `TRISC3=0` | `main.c` |
+| **RC3** | **LED 1** — transmisie de date; aprins cat dureaza si fereastra de downlink (F-032) | iesire | `ANSC3=0`, `TRISC3=0` | `main.c` |
 | **RC6** | **LED 2** — pairing / eroare de join; **clipeste** cat fereastra de pairing e deschisa | iesire | `ANSC6=0`, `TRISC6=0` | `main.c` |
 | **RC1** | **TPL5110 DONE** | iesire, **LOW permanent** | `ANSC1=0`, `TRISC1=0` | `main.c` (F-018) |
 | RA0 / RA1 | ICSPDAT / ICSPCLK (programare) | — | `LVP=ON` | `config_bits.c` |
@@ -183,7 +183,9 @@ identice cu cele din `teste-sistemcomplet/`.
 
 **Rolul LED-urilor s-a schimbat** fata de firmware-ul de temperatura:
 inainte LED1 = transmisie periodica si LED2 = transmisie fortata de
-buton; acum **LED1 = transmisie de date** (orice `DATA_ENC` reusit) si
+buton; acum **LED1 = transmisie de date**: se aprinde la fiecare `DATA_ENC`
+emis si se stinge dupa inchiderea ferestrei de downlink - NU este un puls
+blocant, fiindca ar intarzia receptia si ar face senzorul surd (F-032). Iar
 **LED2 = pairing**: clipeste la 5 Hz cat timp butonul 2 este tinut apasat
 si cat timp fereastra de pairing este deschisa, aprins continuu in timpul
 unei incercari de join, trei clipiri scurte la esec, doua pulsuri la
@@ -845,6 +847,36 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
   cheia), pierderea unui singur pachet devine definitiva. `DeviceRecord`
   s-a modificat, deci `REGISTRY_BLOB_VERSION` a trecut pe **2**.
 
+### F-032 — Pulsul LED-ului de date facea senzorul surd la downlink
+- **Simptom:** hub-ul retrimitea `CMD_DOWN(RESET)` la fiecare pachet, cu
+  `incercarea 1`, `2`, `3`, `4`, `5`..., iar senzorul continua netulburat
+  sa emita `DATA_ENC`. Nici `ACK`-urile nu ajungeau vreodata: LED2 nu
+  pulsa niciodata dupa o transmisie, desi `PAIRING_SEND_ACK` era 1.
+  Inrolarea, in schimb, mergea din prima de fiecare data.
+- **Cauza:** in bucla de date, intre `LoRa_SendBuffer()` si
+  `LoRa_Receive()` statea `Led_PulseData()`, care este un puls **blocant**
+  de `LED_PULSE_MS` = **150 ms**. Fereastra de receptie a senzorului se
+  deschidea deci abia la 150 ms dupa terminarea propriei transmisii, iar
+  hub-ul raspunde mult mai devreme: cateva milisecunde de procesare si de
+  scris pe Serial, plus ~41 ms de timp pe aer pentru cele 12 octeti ai lui
+  `CMD_DOWN` la SF7/BW125/CR4/5. Downlink-ul era complet terminat pe la
+  ~55 ms, cand senzorul inca tinea LED-ul aprins cu radioul in standby.
+  **Niciun downlink din calea de date nu a functionat vreodata.**
+  Asimetria cu inrolarea este exact dovada: `Join_Attempt()` trece direct
+  de la `LoRa_SendBuffer()` la `LoRa_Receive()`, fara nicio intarziere, si
+  de aceea `JOIN_ACCEPT` se prindea mereu.
+- **Fix:** LED1 se aprinde inainte de fereastra si se stinge dupa ea, cu
+  doua scrieri simple in `LATC`, deci receptia porneste imediat dupa TX.
+  `Led_PulseData()` a ramas fara apelanti si a fost scoasa. Vizual,
+  LED1 sta aprins cat dureaza fereastra de downlink in loc de 150 ms fixe
+  - tot o clipire per pachet. Ca efect secundar, firmware-ul s-a micsorat
+  cu 15 cuvinte: 3936 -> **3921**.
+- **De retinut:** intre o transmisie si fereastra ei de receptie nu are
+  voie sa stea NIMIC blocant - nici LED-uri, nici scrieri in HEF, nici
+  masuratori. Fereastra este singura ocazie in care celalalt capat poate
+  vorbi, si se inchide singura. Orice `__delay_ms()` pus acolo "doar
+  pentru feedback vizual" costa exact functionalitatea.
+
 ---
 
 ## 10. Reguli de lucru in acest proiect
@@ -883,7 +915,7 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
     proiectului**, nu editand fisierele: MPLAB X rescrie
     `Makefile-default.mk` la fiecare build (F-029). Dupa orice adaugare
     de cod pe senzor, **citeste raportul de memorie** — marja este de
-    **32 de cuvinte si 23 de octeti** (dupa pairing-ul manual). Daca mai
+    **47 de cuvinte si 23 de octeti** (dupa F-032). Daca mai
     e nevoie de spatiu, economia usoara ramasa este cea numita in F-028:
     frame counter-ul se impacheteaza inca prin deplasari pe 32 de biti
     (`Nvm_LoadFrameCounter` are singur 192 de cuvinte).
@@ -905,12 +937,13 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
 | Un `DATA_ENC` rejucat e respins | verificarea `frameCounter > lastFrameCounterUp` |
 | Dupa reset de alimentare, senzorul reia comunicarea fara re-pairing si fara reutilizarea unui counter | HEF + saltul cu `FCNT_CHECKPOINT_EVERY` (sectiunea 7.1) |
 | `remove <DevEUI>` + `RESET` dezinroleaza curat, **si dezinrolarea este confirmata, nu presupusa** | `commandRemove()` marcheaza; `handleEncryptedData()` retrimite `RESET` la fiecare pachet al device-ului marcat; `servicePendingRemovals()` sterge inregistrarea abia dupa `REMOVE_CONFIRM_SILENCE_MS` de tacere (F-031) |
+| Downlink-ul ajunge efectiv la senzor | fereastra de receptie se deschide imediat dupa TX, fara nicio intarziere blocanta (F-032) |
 | Un `RESET` pierdut nu lasa senzorul blocat in retea | inregistrarea si cheia se pastreaza cat timp senzorul se aude, deci hub-ul poate reincerca oricat (F-031) |
 | `remove` pe un senzor oprit nu blocheaza registrul | `commandRemove()` refuza marcarea daca `hasUplink` este fals si trimite operatorul la `force` |
 | Registrul hub-ului persista peste repornire | `DeviceRegistry` pe NVS |
 | Senzorul se inroleaza **doar la cererea explicita a utilizatorului** | `DEV_STATE_IDLE` este starea implicita in `senzor/main.c`; fereastra se deschide numai din `ButtonPair_HeldLong()` (butonul 2 tinut ~3 s) si se inchide dupa `PAIRING_MAX_ATTEMPTS` incercari |
 | Dupa `CMD_DOWN(RESET)` senzorul nu se re-inroleaza singur | ramura `CMD_TYPE_RESET` trece in `DEV_STATE_IDLE`, nu in `DEV_STATE_JOINING` |
-| Firmware-ul senzorului **incape** in PIC16LF1508 | **VERIFICAT** cu `xc8-cc` v3.10, `-O2`, cu HEF rezervat, in AMBELE configuratii: Production **3936** / 3968 words si **233** / 256 octeti, Debug cu Snap **3937** / 233. Ultimul cuvant de cod este la `0x0F7F` in ambele, deci regiunea HEF este curata. Marja ramasa: **32 de cuvinte**. A fost nevoie de trecerea de la AES la XTEA (F-024) plus reducerile din F-025, F-028, F-029 si F-030. |
+| Firmware-ul senzorului **incape** in PIC16LF1508 | **VERIFICAT** cu `xc8-cc` v3.10, `-O2`, cu HEF rezervat, in AMBELE configuratii: Production **3921** / 3968 words si **233** / 256 octeti, Debug cu Snap **3922** / 233. Ultimul cuvant de cod este la `0x0F7F` in ambele, deci regiunea HEF este curata. Marja ramasa: **47 de cuvinte**. A fost nevoie de trecerea de la AES la XTEA (F-024) plus reducerile din F-025, F-028, F-029 si F-030. |
 
 ---
 
@@ -948,8 +981,8 @@ raman toate. Alte corectii din audit: RAM-ul real este 256 B, nu 512
 codul se scria peste ea (F-027); aritmetica pe 32 de biti a fost scoasa
 din codul fierbinte (F-028). `JOIN_ACCEPT` s-a scurtat de la 22 la 10
 octeti. Hub-ul nu mai depinde de biblioteca `Crypto`. Rezultat masurat cu
-`xc8-cc` v3.10, `-O2`, cu HEF rezervat: **3936/3968 cuvinte utilizabile
-si 233/256 octeti** (Debug cu Snap: 3937/233).*
+`xc8-cc` v3.10, `-O2`, cu HEF rezervat: **3921/3968 cuvinte utilizabile
+si 233/256 octeti** (Debug cu Snap: 3922/233).*
 
 *Actualizare 2026-08-25 — **pairing manual pe senzor**: fara sesiune,
 senzorul sta in `DEV_STATE_IDLE` si tace; fereastra de inrolare se

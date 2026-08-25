@@ -1633,12 +1633,9 @@ static uint8_t ButtonPair_HeldLong(void)
  *     LED1 (RC3) = transmisie de date, LED2 (RC6) = pairing / eroare.
  * ================================================================== */
 
-static void Led_PulseData(void)
-{
-    LED1_LAT = 1;
-    __delay_ms(LED_PULSE_MS);
-    LED1_LAT = 0;
-}
+/* LED1 (transmisie de date) NU are o functie de puls: pulsul ar fi o
+ * intarziere blocanta chiar in fereastra de downlink (F-032). Se aprinde
+ * si se stinge direct, in jurul receptiei. */
 
 static void Led_PulsePairing(void)
 {
@@ -2288,7 +2285,13 @@ int main(void)
 
             if (LoRa_SendBuffer(txBuffer, DATA_ENC_LEN) != 0U)
             {
-                Led_PulseData();
+                /* LED1 se aprinde acum si se stinge dupa fereastra de
+                 * downlink. Aici NU are voie sa stea un puls blocant:
+                 * hub-ul raspunde in zeci de milisecunde de la sfarsitul
+                 * transmisiei noastre, iar orice __delay_ms() intre TX si
+                 * deschiderea receptiei ne face surzi exact cand vorbeste
+                 * el (F-032). */
+                LED1_LAT = 1;
 
                 /* --- Fereastra de downlink --------------------------- */
                 /* Hub-ul raspunde imediat dupa ce a validat pachetul,
@@ -2325,6 +2328,8 @@ int main(void)
                         /* Pachet strain sau MIC gresit: ignorat. */
                     }
                 }
+
+                LED1_LAT = 0;
             }
 
             /* Counter-ul creste chiar daca transmisia a esuat: o valoare

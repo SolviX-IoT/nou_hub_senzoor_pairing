@@ -877,6 +877,36 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
   vorbi, si se inchide singura. Orice `__delay_ms()` pus acolo "doar
   pentru feedback vizual" costa exact functionalitatea.
 
+### F-033 — Build de verificare in `build/`+`dist/` lasa MPLAB X cu o stare veche
+- **Simptom:** doua "bug-uri" care nu existau. Intai butonul 2 parea mort:
+  se tinea RC5 apasat trei secunde si nu se intampla nimic, desi F-030 era
+  in `main.c`. Apoi, dupa o reprogramare, senzorul parea ca se inroleaza
+  **singur**, fara nicio apasare - exact comportamentul de dinainte de
+  F-030. S-a cautat in maparea pinilor, in pull-up-uri si in cablaj; nu
+  era nimic acolo.
+- **Cauza:** placa fusese programata cu **cod vechi**. Ca sa se verifice
+  incadrarea in flash, firmware-ul fusese compilat cu `xc8-cc` chemat
+  direct, iar iesirea scrisa fix in `senzor/build/` si `senzor/dist/` -
+  directoarele de lucru ale lui MPLAB X. Numele obiectelor nu erau cele
+  pe care le asteapta `Makefile-default.mk`, iar in `dist/` ramanea un
+  `senzor.production.elf` mai nou decat sursele. Build-ul IDE-ului a
+  ramas deci intr-o stare incoerenta si a produs un `.hex` care nu
+  corespundea cu `main.c` de pe disc. Sursa era corecta tot timpul.
+- **Fix:** *Clean* pe proiect in MPLAB X, apoi *Make and Program Device*.
+  Pentru viitor: un build de verificare facut din afara IDE-ului **nu
+  scrie in `senzor/build/` sau `senzor/dist/`** - se da o alta destinatie
+  (un director temporar). Daca s-a scris totusi acolo, se face
+  obligatoriu *Clean* inainte de urmatoarea programare.
+- **Cum se verifica in trei secunde ce s-a programat:** raportul de
+  memorie din fereastra de build, sau
+  `senzor/dist/default/production/senzor.production.mum`, trebuie sa arate
+  cifra din sectiunea 11 (acum **3921** de cuvinte / 233 de octeti). Alta
+  cifra inseamna alt cod decat cel din `main.c`, si nicio cautare in
+  schema nu are rost pana nu se potriveste.
+- **De retinut:** cand o placa se poarta ca o versiune anterioara a
+  firmware-ului, prima intrebare nu este "ce am gresit in cod", ci "ce cod
+  este de fapt pe cip".
+
 ---
 
 ## 10. Reguli de lucru in acest proiect
@@ -908,7 +938,14 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
     acoperite de MIC (`*_MIC_INPUT_LEN`, definite in ambele fisiere).
 12. **Cheile nu se afiseaza pe Serial.** `list` arata DevEUI si DevAddr,
     niciodata `SessKey` sau `AppKey`.
-13. **Senzorul se compileaza cu `-O2`, iar regiunea HEF ramane
+13. **Un build de verificare nu scrie in `senzor/build/` sau
+    `senzor/dist/`** (F-033). Sunt directoarele de lucru ale lui MPLAB X;
+    obiecte straine acolo lasa IDE-ul sa programeze cod vechi, iar
+    simptomul arata ca un bug de firmware sau de cablaj. Daca s-a scris
+    totusi acolo, *Clean* pe proiect inainte de urmatoarea programare.
+    Dupa fiecare programare, verifica cifra din raportul de memorie:
+    trebuie sa fie cea din sectiunea 11.
+14. **Senzorul se compileaza cu `-O2`, iar regiunea HEF ramane
     rezervata** (`code-model-rom = default,-f80-fff`). Cu `-O0`
     firmware-ul nu mai incape, iar fara rezervare linkerul pune cod peste
     HEF (F-027). Cele doua se seteaza **din fereastra de proprietati a
@@ -919,7 +956,7 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
     e nevoie de spatiu, economia usoara ramasa este cea numita in F-028:
     frame counter-ul se impacheteaza inca prin deplasari pe 32 de biti
     (`Nvm_LoadFrameCounter` are singur 192 de cuvinte).
-14. **Pe senzor, evita `int32_t` in codul fierbinte** (F-028). O
+15. **Pe senzor, evita `int32_t` in codul fierbinte** (F-028). O
     inmultire sau o impartire pe 32 de biti costa peste 100 de cuvinte de
     program pe PIC16. Foloseste uniunea `Word32` pentru conversii
     big-endian si aritmetica pe 16 biti unde se poate.

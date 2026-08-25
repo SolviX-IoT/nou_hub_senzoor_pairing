@@ -2,7 +2,7 @@
 
 > Fisier de context permanent pentru Claude Code si pentru orice om care
 > intra in proiect. **Se actualizeaza la FIECARE commit**: vezi sectiunea
-> [Regula de actualizare](#10-regula-de-actualizare) de la final.
+> [Regula de actualizare](#12-regula-de-actualizare) de la final.
 >
 > Acest proiect (`teste_pairing/`) **porneste din `teste-sistemcomplet/`**
 > si pastreaza aceeasi arhitectura: un folder `senzor/` (proiect MPLAB X)
@@ -35,8 +35,12 @@ Ambele module radio sunt SX1276, deci parametrii radio trebuie sa fie
    este AES: nu incapea in PIC16LF1508 (F-024).
 3. **Registru pe hub** — lista senzorilor inrolati, salvata in NVS, deci
    supravietuieste repornirii hub-ului.
-4. **Stergere** — `remove <DevEUI>` scoate un device din retea si ii
-   trimite un `RESET` la primul contact.
+4. **Stergere confirmata** — `remove <DevEUI>` marcheaza device-ul, iar
+   hub-ul ii trimite `CMD_DOWN(RESET)` la **fiecare** pachet al lui.
+   Inregistrarea, si odata cu ea cheia, se sterg abia dupa ce senzorul
+   **tace** `REMOVE_CONFIRM_SILENCE_MS` — tacerea este dovada ca a primit
+   comanda. Varianta care stergea din prima lasa senzorul blocat in retea
+   daca acel unic downlink se pierdea (F-031).
 5. **Receptie pe senzor** — driverul LoRa al senzorului era doar
    emitator; acum are si `LoRa_Receive()`.
 6. **Memorie ne-volatila pe senzor** — HEF (High-Endurance Flash), pentru
@@ -393,8 +397,18 @@ refolosi acelasi flux de chei.
 [8..11]  MIC (4B) = CBC-MAC-XTEA(SessKey, bytes[0..7])
 ```
 
-La `RESET`, senzorul sterge `SessKey` + `DevAddr` din HEF si revine in
-starea "ne-inrolat".
+La `RESET`, senzorul sterge `SessKey` + `DevAddr` din HEF si trece in
+`DEV_STATE_IDLE`, adica **in repaus**: tace si nu cere inrolarea singur.
+Reintrarea in retea cere `pair` pe hub **plus** trei secunde pe butonul 2
+al senzorului (F-030). Dezinrolarea este decizia hub-ului, reintrarea
+ramane a utilizatorului.
+
+`CMD_DOWN` se **retrimite** la fiecare pachet al unui device marcat, cu
+`FrameCounter` downlink nou de fiecare data. Un downlink are o singura
+sansa — senzorul asculta doar `DOWNLINK_WINDOW_MS` = 600 ms dupa fiecare
+transmisie a lui — deci hub-ul insista pana cand senzorul tace (F-031).
+Din acelasi motiv, intre transmisia senzorului si deschiderea ferestrei
+lui de receptie **nu are voie sa stea nimic blocant** (F-032).
 
 ### 5.9. De ce se pastreaza checksum-ul XOR sub criptare
 
@@ -474,17 +488,30 @@ dupa fiecare reset, care nu deranjeaza pe nimeni.
 
 Registrul senzorilor inrolati traieste in spatiul NVS `solvix-pair`.
 Fiecare inregistrare tine `DevEUI`, `DevAddr`, `SessKey`,
-`lastFrameCounterUp`, `downCounter`, `lastDevNonce`, numarul de pachete si
-marcajul `pendingReset`.
+`lastFrameCounterUp`, `hasUplink`, `downCounter`, `lastDevNonce`, numarul
+de pachete, si starea dezinrolarii in curs: `pendingReset`,
+`resetAttempts`, `resetSentMs`.
+
+**Doua campuri sunt relative la `millis()`**, deci la pornirea hub-ului, si
+se pun pe **0** la incarcarea din NVS: `lastSeenMs` si `resetSentMs`.
+Pentru al doilea nu este doar curatenie — `0` inseamna "niciun RESET
+trimis in sesiunea asta", iar confirmarea prin tacere refuza sa se
+pronunte in acel caz. Fara zeroizare, un `millis()` mic minus o valoare
+veche ar da o diferenta uriasa si orice dezinrolare in curs ar aparea drept
+confirmata imediat dupa fiecare repornire (F-031).
 
 Se salveaza la fiecare inrolare, la fiecare stergere si o data la
 `REGISTRY_SAVE_EVERY` (implicit 20) pachete de date. NVS este flash:
 scrierea la fiecare pachet l-ar uza degeaba, iar anti-replay-ul cere doar
 ca frame counter-ul sa fie **strict crescator**.
 
-Structura salvata are un numar de versiune (`REGISTRY_BLOB_VERSION`): daca
-`DeviceRecord` se modifica, registrul vechi este ignorat in loc sa fie
-interpretat gresit octet cu octet.
+Structura salvata are un numar de versiune (`REGISTRY_BLOB_VERSION`,
+acum **2**): daca `DeviceRecord` se modifica, registrul vechi este ignorat
+in loc sa fie interpretat gresit octet cu octet. **Pretul, de retinut
+inainte de a-l incrementa:** dupa un asemenea update hub-ul porneste cu
+registrul gol, in timp ce senzorii isi pastreaza sesiunile in HEF. Ei
+continua sa emita si apar ca `DevAddr ... nu este inrolat`, iar fiecare
+trebuie reinrolat o data, manual.
 
 ---
 
@@ -510,8 +537,8 @@ interpretat gresit octet cu octet.
 
 | Fisier | Rol |
 |--------|-----|
-| `SolvixHub_Tests.ino` | Sketch principal: meniu pe Serial (115200), tabloul `TESTS[]`, **comenzile in cuvinte** (`pair`, `list`, `provisioned`, `remove`, `stats`, `help`), butonul 1 ca declansator de pairing, `setup()` care porneste SPI si incarca registrul. |
-| `Config.h` | **Singura sursa de adevar pentru pini** si constante: SPI, ETH, LoRa (inclusiv modulatia), butoane, LED-uri, si **sectiunea de pairing**: `PAIRING_MODE_TIMEOUT_MS`, `PAIRING_BLINK_MS`, `PAIRING_ENCRYPT_PAYLOAD`, `PAIRING_SEND_ACK`, `REGISTRY_*` si lista `PROVISIONED_DEVICES_INIT`. |
+| `SolvixHub_Tests.ino` | Sketch principal: meniu pe Serial (115200), tabloul `TESTS[]`, **comenzile in cuvinte** (`pair`, `list`, `provisioned`, `remove`, `stats`, `help`), butonul 1 ca declansator de pairing, `setup()` care porneste SPI si incarca registrul. `commandRemove()` doar **marcheaza** device-ul (confirmarea se face in `TestPairing`), refuza marcarea unui senzor care nu a trimis niciodata nimic si trimite operatorul la `force`. |
+| `Config.h` | **Singura sursa de adevar pentru pini** si constante: SPI, ETH, LoRa (inclusiv modulatia), butoane, LED-uri, si **sectiunea de pairing**: `PAIRING_MODE_TIMEOUT_MS`, `PAIRING_BLINK_MS`, `PAIRING_ENCRYPT_PAYLOAD`, `PAIRING_SEND_ACK`, `REMOVE_CONFIRM_SILENCE_MS`, `PAIRING_REOPEN_AFTER_REMOVE`, `PAIRING_UNKNOWN_HINT_EVERY`, `REGISTRY_*` si lista `PROVISIONED_DEVICES_INIT`. |
 | `SpiBus.h`, `SpiBus.cpp` | Arbitrajul magistralei SPI partajate; `SpiGuard` ridica CS-ul in destructor. |
 | `TestBase.h`, `TestBase.cpp` | Structura `Test { name, description, begin, tick, stop }` + ajutoare de afisare. |
 | `LoRaRadio.h`, `LoRaRadio.cpp` | Invelis peste libraria LoRa: `begin()`, `sendText()`, **`sendRaw()` (NOU)**, `receive()`, `receiveRaw()`, `sleep()`. Receptia e prin polling. |
@@ -1002,29 +1029,66 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
   inlocuieste textul "PRESUPUNERE" cu fapta constatata (in special
   `HEF_ROW_WORDS` si topologia divizorului NTC).
 
+- **schimbare care se vede din afara** (comportament, incadrare in flash,
+  o capcana platita cu timp) -> se adauga un paragraf in sectiunea 13
+  ("Jurnal"), cu data si cu eticheta `F-0xx`, si se actualizeaza blocul
+  "Starea curenta" de la finalul ei.
+
 Mesajul de commit trebuie sa mentioneze eticheta `F-0xx` atunci cand
 commit-ul rezolva un bug din sectiunea 9.
 
 ---
 
-*Ultima actualizare: 2026-08-23 — pairing criptat, incadrat in
-PIC16LF1508. Auditul primei versiuni a aratat ca schema pe AES-128 nu
-incapea (5426 de cuvinte / 446 de octeti fata de 4096 / 256 disponibili),
-deci cifrul a fost inlocuit cu **XTEA-128** cu CBC-MAC si CTR (F-024) —
-pairing-ul, cheia de sesiune, anti-replay-ul si criptarea payload-ului
-raman toate. Alte corectii din audit: RAM-ul real este 256 B, nu 512
-(F-025); randul de HEF are 32 de cuvinte, nu 16, deci harta are 4 randuri
-(F-026); regiunea HEF este acum rezervata din linker, fiindca altfel
-codul se scria peste ea (F-027); aritmetica pe 32 de biti a fost scoasa
-din codul fierbinte (F-028). `JOIN_ACCEPT` s-a scurtat de la 22 la 10
-octeti. Hub-ul nu mai depinde de biblioteca `Crypto`. Rezultat masurat cu
-`xc8-cc` v3.10, `-O2`, cu HEF rezervat: **3921/3968 cuvinte utilizabile
-si 233/256 octeti** (Debug cu Snap: 3922/233).*
+## 13. Jurnal
 
-*Actualizare 2026-08-25 — **pairing manual pe senzor**: fara sesiune,
-senzorul sta in `DEV_STATE_IDLE` si tace; fereastra de inrolare se
-deschide tinand butonul 2 (RC5) apasat ~3 secunde si se inchide dupa
+**2026-08-23 — pairing criptat, incadrat in PIC16LF1508.** Auditul primei
+versiuni a aratat ca schema pe AES-128 nu incapea (5426 de cuvinte / 446
+de octeti fata de 4096 / 256 disponibili), deci cifrul a fost inlocuit cu
+**XTEA-128** cu CBC-MAC si CTR (F-024) — pairing-ul, cheia de sesiune,
+anti-replay-ul si criptarea payload-ului raman toate. Alte corectii din
+audit: RAM-ul real este 256 B, nu 512 (F-025); randul de HEF are 32 de
+cuvinte, nu 16, deci harta are 4 randuri (F-026); regiunea HEF este
+rezervata din linker, fiindca altfel codul se scria peste ea (F-027);
+aritmetica pe 32 de biti a fost scoasa din codul fierbinte (F-028).
+`JOIN_ACCEPT` s-a scurtat de la 22 la 10 octeti. Hub-ul nu mai depinde de
+biblioteca `Crypto`. Configuratia de DEBUG a cerut inca 19 octeti de RAM,
+fiindca depanatorul isi rezerva 16 (F-029).
+
+**2026-08-25 — pairing manual pe senzor (F-030).** Fara sesiune, senzorul
+sta in `DEV_STATE_IDLE` si tace; fereastra de inrolare se deschide tinand
+butonul 2 (RC5) apasat ~3 secunde si se inchide dupa
 `PAIRING_MAX_ATTEMPTS` = 10 incercari, cu LED2 clipind cat este deschisa.
-`CMD_DOWN(RESET)` duce senzorul in repaus, nu inapoi in pairing. Hub-ul
-nu s-a modificat deloc. Incadrarea a cerut F-030 (o singura bucla de
-intarziere impartita intre cele doua bucle de pairing).*
+`CMD_DOWN(RESET)` duce senzorul in repaus, nu inapoi in pairing.
+Incadrarea a cerut ca cele doua bucle de pairing sa imparta o singura
+bucla de intarziere: fiecare `__delay_ms()` cu o constanta noua costa vreo
+25 de cuvinte.
+
+**2026-08-25 — dezinrolare confirmata pe hub (F-031).** `remove` era
+"trimite si uita": un singur `CMD_DOWN(RESET)`, urmat imediat de stergerea
+inregistrarii. Cum downlink-ul are o singura sansa, un pachet pierdut lasa
+senzorul emitand cu o cheie pe care hub-ul tocmai o aruncase, deci fara
+nicio cale de a-l mai opri. Acum RESET-ul se retrimite la fiecare pachet,
+iar inregistrarea dispare abia dupa `REMOVE_CONFIRM_SILENCE_MS` de tacere.
+`DeviceRecord` s-a modificat, deci `REGISTRY_BLOB_VERSION` a trecut pe 2 —
+si, ca urmare, senzorii deja inrolati au trebuit reinrolati o data.
+
+**2026-08-25 — downlink-ul ajunge efectiv la senzor (F-032).** Intre
+transmisie si fereastra de receptie statea un puls blocant de LED de
+150 ms, iar hub-ul raspunde in ~55 ms: **niciun downlink din calea de date
+nu functionase vreodata**, nici ACK, nici RESET. Doar inrolarea mergea,
+fiindca acolo receptia se deschide imediat dupa emisie. LED1 se aprinde
+acum inainte de fereastra si se stinge dupa ea. Fixul a si eliberat 15
+cuvinte.
+
+**2026-08-25 — capcana de build (F-033).** Doua "bug-uri" inexistente
+(butonul 2 mort, apoi inrolare automata) s-au dovedit a fi acelasi lucru:
+placa era programata cu cod vechi, fiindca build-urile de verificare a
+incadrarii scrisesera in `senzor/build/` si `senzor/dist/`, directoarele
+de lucru ale lui MPLAB X. *Clean* pe proiect a rezolvat.
+
+**Starea curenta**, masurata cu `xc8-cc` v3.10, `-O2`, cu HEF rezervat, in
+ambele configuratii: **3921 / 3968 cuvinte utilizabile si 233 / 256
+octeti** (Debug cu Snap: 3922 / 233). Ultimul cuvant de cod este la
+`0x0F7F`, deci regiunea HEF este curata. Marja: 47 de cuvinte si 23 de
+octeti. Sketch-ul hub-ului compileaza pentru ESP32 Dev Module fara erori
+si fara warning-uri proprii (cele 5 raman din `EthernetENC` si `LoRa`).

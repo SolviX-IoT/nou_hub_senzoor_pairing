@@ -12,7 +12,7 @@
  *      impreuna cu DevAddr, in memoria ne-volatila (HEF);
  *    - dupa inrolare citeste termistorul NTC 10K / B=3950 de pe RC2
  *      (canal AN6) si trimite temperatura CRIPTATA (DATA_ENC) la
- *      intervalul dat de TX_INTERVAL_MS, sau imediat la apasarea
+ *      intervalul de somn (vezi SLEEP_WAKEUPS), sau imediat la apasarea
  *      butonului de pe RC4;
  *    - dupa fiecare transmisie deschide o fereastra scurta de receptie
  *      pentru un eventual CMD_DOWN (ACK sau RESET).
@@ -52,10 +52,13 @@
  *     prin polling pe RegIrqFlags, nu prin intrerupere.
  *  4) Butoanele sunt ACTIVE HIGH cu pull-down EXTERN (PORTC nu are
  *     weak pull-up pe acest device). Asa erau tratate si in codul vechi.
- *  5) Butonul "de fortare" este cel de pe RC4. RC5 ramane liber.
- *  6) RC1 este pinul DONE al TPL5110. Sleep-ul este DEZACTIVAT (problema
- *     hardware la TPL5110, de rezolvat ulterior), deci senzorul ramane
- *     alimentat permanent si RC1 este tinut LOW permanent (F-018).
+ *  5) Butonul "de fortare" este cel de pe RC4; RC5 deschide fereastra de
+ *     pairing daca este tinut apasat ~3 secunde (F-030).
+ *  6) RC1 este LIBER si neconectat. Nu primeste cod: ramane pe
+ *     configuratia MCC din pins.c, adica intrare analogica, ceea ce
+ *     pentru un pin nefolosit este exact starea buna - bufferul digital
+ *     de intrare este dezactivat, deci un nivel flotant nu consuma
+ *     curent. Senzorul este alimentat permanent.
  *  7) Nu exista niciun pin de "switch" in proiectul existent.
  *  8) HEF: blocul de stergere si grupul de latch-uri au 32 de cuvinte.
  *     NU mai este o presupunere - este citit din fisierul de device
@@ -100,13 +103,39 @@
  * 1. PARAMETRI USOR DE MODIFICAT
  * ================================================================== */
 
-/* Intervalul intre doua transmisii periodice, in milisecunde.
- * Se obtine cu o bucla software (timerul hardware NU este configurat). */
-#define TX_INTERVAL_MS          5000U
+/*
+ * Intervalul dintre doua transmisii NU mai este in milisecunde, fiindca
+ * nu mai este o asteptare activa: intre pachete senzorul DOARME, iar
+ * trezirea o da watchdog-ul. Durata se exprima deci in numar de treziri
+ * WDT, nu intr-o valoare de timp.
+ *
+ * De ce fragmentat si nu un singur somn lung: butonul 2 este pe RC5,
+ * adica pe PORTC, iar acest device are interrupt-on-change DOAR pe PORTA
+ * si PORTB (in pic16lf1508.h exista IOCAF/IOCAN/IOCAP si IOCBF/IOCBN/
+ * IOCBP, dar niciun registru IOCC*). Un senzor adormit nu poate fi deci
+ * trezit de buton, si cele trei secunde de apasare pentru re-pairing
+ * (F-030) ar deveni inutilizabile. Asa ca doarme in reprize scurte si
+ * verifica butoanele la fiecare trezire: doarme in continuare ~99% din
+ * timp, dar butonul raspunde in cel mult o perioada WDT.
+ *
+ * WDTPS = 0b01011 inseamna 1:65536 pe LFINTOSC (~31 kHz), adica
+ * 65536/31000 = ~2,11 s pe trezire. Este si valoarea de reset a lui
+ * WDTCON, dar se scrie explicit ca sa nu depinda de ea.
+ */
+#define SLEEP_WDT_WDTPS         0x0BU   /* 1:65536 -> ~2,11 s */
+#define SLEEP_WAKEUPS           14U     /* 14 x ~2,11 s = ~29,6 s */
 
-/* Pasul buclei de asteptare. Cu cat e mai mic, cu atat butonul e citit
- * mai des; 10 ms este un compromis bun. TX_INTERVAL_MS ar trebui sa fie
- * un multiplu de aceasta valoare. */
+/*
+ * LFINTOSC are toleranta larga (ordinul a +-15%), deci intervalul real
+ * de somn este de ordinul 25-34 s, nu fix 29,6. Cine schimba
+ * SLEEP_WAKEUPS trebuie sa schimbe si REMOVE_CONFIRM_SILENCE_MS din
+ * hub/SolvixHub_Tests/Config.h: hub-ul confirma dezinrolarea prin tacere,
+ * iar un senzor care doarme tace si el (F-031, regula 11 din CLAUDE.md).
+ */
+
+/* Pasul buclelor de asteptare din veghe (asteptarea eliberarii unui
+ * buton, fereastra de receptie). Cu cat e mai mic, cu atat butonul e
+ * citit mai des; 10 ms este un compromis bun. */
 #define TX_TICK_MS              10U
 
 /* Debounce buton, in milisecunde (identic cu codul provizoriu). */
@@ -236,11 +265,6 @@
 /* --- LED-uri -------------------------------------------------------- */
 #define LED1_LAT                LATCbits.LATC3  /* transmisie de date    */
 #define LED2_LAT                LATCbits.LATC6  /* pairing / eroare join */
-
-/* --- TPL5110 DONE (timerul nu se foloseste; tinut LOW) ------------- */
-#define TPL5110_DONE_LAT        LATCbits.LATC1
-#define TPL5110_DONE_TRIS       TRISCbits.TRISC1
-#define TPL5110_DONE_ANSEL      ANSELCbits.ANSC1
 
 /* =====================================================================
  * 3. REGISTRELE SX1276
@@ -428,11 +452,13 @@ static volatile uint8_t loraVersion = 0xFFU;
  *  Cu FCNT_CHECKPOINT_EVERY = 50 si un pachet la 5 secunde rezulta ~345
  *  de scrieri pe zi impartite la 2 randuri: peste 500 de zile pe rand.
  *
- *  NOTA PENTRU VIITOR (reactivarea TPL5110): cat timp senzorul ramane
- *  alimentat permanent, checkpoint-ul rar este suficient. Cand sleep-ul
- *  se reactiveaza, fiecare trezire devine un cold boot cu RAM-ul pierdut,
- *  deci counter-ul va trebui scris la FIECARE ciclu, iar inelul de mai
- *  sus va trebui marit (sau HEF-ul inlocuit cu un FRAM extern).
+ *  Tot acest calcul sta pe un fapt: senzorul este ALIMENTAT PERMANENT,
+ *  deci RAM-ul se pastreaza intre transmisii si counter-ul poate trai
+ *  acolo intre doua checkpoint-uri. Daca s-ar introduce vreodata un
+ *  regim in care alimentarea se taie intre transmisii, fiecare trezire ar
+ *  fi un cold boot cu RAM-ul pierdut: counter-ul ar trebui scris la
+ *  FIECARE ciclu, iar inelul de mai sus ar trebui marit (sau HEF-ul
+ *  inlocuit cu un FRAM extern).
  * ================================================================== */
 
 #define HEF_ROW_WORDS           32U
@@ -1059,7 +1085,7 @@ static void Nvm_EraseSession(void)
 static uint32_t Nvm_LoadFrameCounter(void)
 {
     uint32_t best = 0UL;
-    uint32_t value;
+    Word32   value;
     uint16_t rowAddress;
     uint8_t  slot;
     uint8_t  found = 0U;
@@ -1073,14 +1099,18 @@ static uint32_t Nvm_LoadFrameCounter(void)
             continue;
         }
 
-        value  = ((uint32_t)HEF_ReadByte((uint16_t)(rowAddress + 1U)) << 24);
-        value |= ((uint32_t)HEF_ReadByte((uint16_t)(rowAddress + 2U)) << 16);
-        value |= ((uint32_t)HEF_ReadByte((uint16_t)(rowAddress + 3U)) << 8);
-        value |= (uint32_t)HEF_ReadByte((uint16_t)(rowAddress + 4U));
+        /* In HEF counter-ul este scris big-endian, ca pe fir. XC8 tine
+         * intregii little-endian, deci octetul cel mai semnificativ este
+         * byte[3]: despachetarea devine mutare de octeti, fara nicio
+         * deplasare pe 32 de biti (F-028). */
+        value.byte[3] = HEF_ReadByte((uint16_t)(rowAddress + 1U));
+        value.byte[2] = HEF_ReadByte((uint16_t)(rowAddress + 2U));
+        value.byte[1] = HEF_ReadByte((uint16_t)(rowAddress + 3U));
+        value.byte[0] = HEF_ReadByte((uint16_t)(rowAddress + 4U));
 
-        if ((found == 0U) || (value > best))
+        if ((found == 0U) || (value.word > best))
         {
-            best = value;
+            best = value.word;
             fcntSlot = slot;
             found = 1U;
         }
@@ -1091,17 +1121,20 @@ static uint32_t Nvm_LoadFrameCounter(void)
 
 static void Nvm_SaveFrameCounter(uint32_t value)
 {
+    Word32   packed;
     uint16_t rowAddress;
 
     fcntSlot = (uint8_t)((fcntSlot + 1U) % HEF_FCNT_SLOTS);
     rowAddress = (uint16_t)(HEF_ROW_FCNT_FIRST + ((uint16_t)fcntSlot * HEF_ROW_WORDS));
 
+    packed.word = value;
+
     HEF_ClearRowBuffer();
     hefRowBuffer[0] = HEF_MAGIC_FCNT;
-    hefRowBuffer[1] = (uint8_t)((value >> 24) & 0xFFUL);
-    hefRowBuffer[2] = (uint8_t)((value >> 16) & 0xFFUL);
-    hefRowBuffer[3] = (uint8_t)((value >> 8) & 0xFFUL);
-    hefRowBuffer[4] = (uint8_t)(value & 0xFFUL);
+    hefRowBuffer[1] = packed.byte[3];   /* big-endian pe fir si in HEF */
+    hefRowBuffer[2] = packed.byte[2];
+    hefRowBuffer[3] = packed.byte[1];
+    hefRowBuffer[4] = packed.byte[0];
 
     HEF_WriteRow(rowAddress);
 }
@@ -1125,8 +1158,8 @@ static void LoRa_Deselect(void)
 static void LoRa_WriteRegister(uint8_t address, uint8_t value)
 {
     LoRa_Select();
-    (void)Lora_SPI.ByteExchange(address | 0x80U);   /* bit7 = 1 -> scriere */
-    (void)Lora_SPI.ByteExchange(value);
+    (void)SPI1_ByteExchange(address | 0x80U);       /* bit7 = 1 -> scriere */
+    (void)SPI1_ByteExchange(value);
     LoRa_Deselect();
 }
 
@@ -1135,11 +1168,23 @@ static uint8_t LoRa_ReadRegister(uint8_t address)
     uint8_t value;
 
     LoRa_Select();
-    (void)Lora_SPI.ByteExchange(address & 0x7FU);   /* bit7 = 0 -> citire */
-    value = Lora_SPI.ByteExchange(0x00U);
+    (void)SPI1_ByteExchange(address & 0x7FU);       /* bit7 = 0 -> citire */
+    value = SPI1_ByteExchange(0x00U);
     LoRa_Deselect();
 
     return value;
+}
+
+/*
+ * Trece radioul in SLEEP. SX1276 isi pastreaza registrele in acest mod -
+ * se pierde doar FIFO-ul, care oricum se rescrie la fiecare pachet -
+ * deci la trezire NU se reia LoRa_Initialize(). LoRa_SendBuffer() trece
+ * oricum radioul prin STDBY inainte de a scrie FIFO.
+ */
+static void LoRa_Sleep(void)
+{
+    LoRa_WriteRegister(LORA_REG_OP_MODE,
+                       LORA_LONG_RANGE_MODE | LORA_MODE_SLEEP);
 }
 
 /*
@@ -1155,10 +1200,26 @@ static uint8_t LoRa_Initialize(void)
     /* Lasam cristalul RF96 si POR-ul sa se aseze. */
     __delay_ms(10);
 
-    if (!Lora_SPI.Open(0U))
-    {
-        return 0U;
-    }
+    /*
+     * MSSP-ul se deschide scriind direct registrele, nu prin
+     * Lora_SPI.Open(0). Open() indexeaza tabelul spi1_configuration[] din
+     * driverul MCC si costa 106 cuvinte de program pentru o singura
+     * configuratie folosita - pe un device cu 4096 in total, nu merita.
+     *
+     * Valorile sunt exact spi1_configuration[0] din
+     * mcc_generated_files/spi/src/mssp.c: stat 0x00, con1 0x0A,
+     * con3 0x10, baud 0x1F (adica 125 kHz la FOSC = 16 MHz). Daca cineva
+     * schimba configuratia din MCC, trebuie schimbate si aici - de aceea
+     * sunt scrise cu tot cu numele campurilor.
+     *
+     * Fisierele generate de MCC raman NEATINSE, ca o regenerare sa nu
+     * strice nimic; toata abaterea sta in main.c.
+     */
+    SSP1STAT = 0x00U;                   /* stat */
+    SSP1CON1 = 0x0AU;                   /* con1: SPI master, FOSC/(4*(SSP1ADD+1)) */
+    SSP1CON3 = 0x10U;                   /* con3 */
+    SSP1ADD  = 0x1FU;                   /* baud -> 125 kHz */
+    SSP1CON1bits.SSPEN = 1U;
 
     /* F-009: SX1276/RFM96 cere SPI mode 0 - ceas idle LOW, esantionare
      * pe frontul crescator. MSSP-ul nu porneste asa implicit. */
@@ -1861,15 +1922,18 @@ static uint8_t Packet_ParseJoinAccept(const uint8_t *packet, uint8_t length)
  */
 static void Packet_BuildDataEnc(const uint8_t *tempPacket, uint32_t counter)
 {
+    Word32  packed;
     uint8_t i;
+
+    packed.word = counter;
 
     txBuffer[0] = LORA_PACKET_MAGIC;
     txBuffer[1] = MSG_TYPE_DATA_ENC;
     txBuffer[2] = devAddr;
-    txBuffer[3] = (uint8_t)((counter >> 24) & 0xFFUL);
-    txBuffer[4] = (uint8_t)((counter >> 16) & 0xFFUL);
-    txBuffer[5] = (uint8_t)((counter >> 8) & 0xFFUL);
-    txBuffer[6] = (uint8_t)(counter & 0xFFUL);
+    txBuffer[3] = packed.byte[3];       /* FrameCounter big-endian */
+    txBuffer[4] = packed.byte[2];
+    txBuffer[5] = packed.byte[1];
+    txBuffer[6] = packed.byte[0];
 
     for (i = 0U; i < LORA_PACKET_LEN; i++)
     {
@@ -1929,13 +1993,17 @@ static uint8_t Packet_ParseCommand(const uint8_t *packet, uint8_t length)
 
 static void Board_Initialize(void)
 {
-    /* --- TPL5110 DONE pe RC1 -------------------------------------- */
-    /* F-018: timerul nu se foloseste in acest cod (sleep dezactivat),
-     * deci DONE trebuie tinut LOW. Un nivel HIGH ar putea taia
-     * alimentarea in mijlocul unei transmisii sau al unei scrieri HEF. */
-    TPL5110_DONE_ANSEL = 0;
-    TPL5110_DONE_LAT   = 0;
-    TPL5110_DONE_TRIS  = 0;
+    /* --- Watchdog: doar ca sursa de trezire din somn --------------- */
+    /* Perioada se scrie explicit, desi 0x0B este si valoarea de reset a
+     * lui WDTCON: asa nu depinde de ea nimic. SWDTEN ramane 0, deci in
+     * veghe watchdog-ul este oprit si nu poate reseta placa in mijlocul
+     * unei transmisii sau al unei scrieri in HEF. */
+    WDTCONbits.WDTPS = SLEEP_WDT_WDTPS;
+    WDTCONbits.SWDTEN = 0;
+
+    /* RC1 nu apare aici: este liber si neconectat, deci ramane pe
+     * configuratia MCC din pins.c (intrare analogica). Un pin nefolosit
+     * nu are nevoie de cod. */
 
     /* --- Butoane pe RC4 / RC5 -------------------------------------- */
     /* RC4 si RC5 nu au bit ANSEL pe acest device, deci doar TRIS. */
@@ -2002,6 +2070,60 @@ static void Wait_PairingBlink(uint16_t milliseconds)
     }
 }
 
+/*
+ * Somnul dintre doua transmisii, valabil DOAR in DEV_STATE_OPERATING.
+ *
+ * Trezirea o da watchdog-ul: la expirare in timpul lui SLEEP, WDT-ul
+ * TREZESTE procesorul in loc sa il reseteze, iar cu GIE = 0 executia
+ * continua de la instructiunea urmatoare - deci nu este nevoie de nicio
+ * rutina de intrerupere si de niciun timer (F-017).
+ *
+ * Watchdog-ul se aprinde doar in jurul lui SLEEP: in veghe, transmisia,
+ * fereastra de receptie si scrierea in HEF sunt lungi si blocante, iar un
+ * WDT pornit le-ar reseta. De aceea config bit-ul este WDTE = SWDTEN, nu
+ * WDTE = ON.
+ *
+ * Somnul este fragmentat fiindca RC5 este pe PORTC, iar acest device are
+ * interrupt-on-change doar pe PORTA si PORTB: un senzor adormit nu poate
+ * fi trezit de buton, deci il verificam noi la fiecare trezire.
+ *
+ * Intoarce:
+ *   0 = somnul s-a incheiat normal;
+ *   1 = butonul 1 (RC4) este apasat -> transmisie fortata;
+ *   2 = butonul 2 (RC5) este apasat -> posibil pairing.
+ */
+#define SLEEP_WOKE_NORMAL       0U
+#define SLEEP_WOKE_FORCE        1U
+#define SLEEP_WOKE_PAIR         2U
+
+static uint8_t Sleep_Cycle(void)
+{
+    uint8_t ticks;
+
+    for (ticks = 0U; ticks < SLEEP_WAKEUPS; ticks++)
+    {
+        CLRWDT();
+        WDTCONbits.SWDTEN = 1;
+        SLEEP();
+        NOP();                  /* instructiunea preluata deja in pipeline */
+        WDTCONbits.SWDTEN = 0;
+
+        /* Citiri brute: debounce-ul si numaratoarea le fac apelantii.
+         * RC5 primul, ca o apasare pe el sa nu fie citita ca RC4. */
+        if (ButtonPair_RawPressed() != 0U)
+        {
+            return SLEEP_WOKE_PAIR;
+        }
+
+        if (Button_RawPressed() != 0U)
+        {
+            return SLEEP_WOKE_FORCE;
+        }
+    }
+
+    return SLEEP_WOKE_NORMAL;
+}
+
 /* =====================================================================
  * 15. INROLAREA (JOINING)
  * ================================================================== */
@@ -2061,11 +2183,11 @@ static uint8_t Join_Attempt(void)
 
 int main(void)
 {
-    uint16_t elapsedMs;         /* cat a trecut din intervalul curent */
     uint16_t joinBackoffMs;
     uint8_t  loraReady;
     uint8_t  forcedByButton;
     uint8_t  rePair;            /* butonul 2 tinut apasat in exploatare */
+    uint8_t  wokeBy;            /* ce a incheiat somnul dintre transmisii */
     uint8_t  joinAttempts;      /* incercari in fereastra curenta        */
     uint8_t  rxLength;
     uint8_t  command;
@@ -2114,11 +2236,9 @@ int main(void)
         LoRa_ShowVersionError();
     }
 
-    joinBackoffMs = JOIN_BACKOFF_START_MS;
-    joinAttempts  = 0U;
-
-    /* Prima transmisie se face imediat, nu dupa TX_INTERVAL_MS. */
-    elapsedMs = TX_INTERVAL_MS;
+    joinBackoffMs  = JOIN_BACKOFF_START_MS;
+    joinAttempts   = 0U;
+    forcedByButton = 0U;
 
     while (1)
     {
@@ -2131,9 +2251,9 @@ int main(void)
         {
             /* Fara __delay_ms() aici: ButtonPair_HeldLong() se intoarce
              * imediat cand RC5 este LOW, deci bucla doar citeste portul in
-             * continuu. Placa este alimentata permanent (sleep-ul este
-             * dezactivat), asa ca o asteptare nu ar economisi nimic, in
-             * schimb inca o intarziere inline ar costa vreo 10 cuvinte. */
+             * continuu. Placa este alimentata permanent, asa ca o
+             * asteptare nu ar economisi nimic, in schimb inca o
+             * intarziere inline ar costa vreo 10 cuvinte. */
             if (ButtonPair_HeldLong() != 0U)
             {
                 deviceState   = DEV_STATE_JOINING;
@@ -2185,8 +2305,7 @@ int main(void)
                 __delay_ms(150);
                 Led_PulsePairing();
 
-                elapsedMs = TX_INTERVAL_MS;   /* prima masuratoare imediat */
-                continue;
+                continue;                     /* prima masuratoare imediat */
             }
 
             Led_ShowJoinFailure();
@@ -2221,56 +2340,9 @@ int main(void)
         }
 
         /* =============================================================
-         * B. Inrolati: bucla normala de masurare si transmisie.
+         * B. Inrolati: masoara, transmite, asculta fereastra de downlink,
+         *    apoi DOARME pana la ciclul urmator.
          * ========================================================== */
-        forcedByButton = 0U;
-        rePair         = 0U;
-
-        /*
-         * Bucla de temporizare software (F-017: nu exista timer hardware
-         * configurat). Se avanseaza cu pasi de TX_TICK_MS si se verifica
-         * butoanele la fiecare pas, ca apasarea sa fie prinsa oricand, nu
-         * doar la capatul intervalului.
-         */
-        while (elapsedMs < TX_INTERVAL_MS)
-        {
-            /* Butonul 2 se asculta si aici, nu doar in repaus: altfel
-             * reinrolarea unui senzor deja inrolat ar cere scoaterea
-             * placii din priza. Se verifica primul, fiindca RC4 si RC5
-             * sunt linii separate si o apasare pe RC5 nu trebuie sa fie
-             * inghitita de iesirea din bucla pe RC4. */
-            if (ButtonPair_HeldLong() != 0U)
-            {
-                rePair = 1U;
-                break;
-            }
-
-            if (Button_Pressed() != 0U)
-            {
-                forcedByButton = 1U;
-                break;                  /* iesim imediat, fara sa asteptam */
-            }
-
-            __delay_ms(TX_TICK_MS);
-            elapsedMs = (uint16_t)(elapsedMs + TX_TICK_MS);
-        }
-
-        /*
-         * Trei secunde pe butonul 2 la un senzor DEJA inrolat inseamna
-         * "vreau sa ma inrolez din nou": stergem sesiunea si deschidem
-         * fereastra de pairing. Este comod la mutarea placii pe alt hub,
-         * dar inseamna si ca trei secunde de apasare accidentala scot
-         * senzorul din retea - de aceea pragul este de trei secunde si nu
-         * de o atingere.
-         */
-        if (rePair != 0U)
-        {
-            Nvm_EraseSession();
-            deviceState   = DEV_STATE_JOINING;
-            joinBackoffMs = JOIN_BACKOFF_START_MS;
-            joinAttempts  = 0U;
-            continue;
-        }
 
         /* --- Masuratoarea ------------------------------------------- */
         tempX100 = NTC_AdcToTempX100(ADC_ReadAveraged());
@@ -2348,12 +2420,71 @@ int main(void)
         {
             /* Fara asta, tinerea butonului apasat ar trimite continuu. */
             Button_WaitRelease();
+            forcedByButton = 0U;
         }
 
-        /* Intervalul se reseteaza si dupa o transmisie fortata: butonul
-         * decaleaza urmatoarea transmisie periodica cu un interval
-         * intreg, ceea ce este comportamentul asteptat. */
-        elapsedMs = 0U;
+        /*
+         * Daca fereastra de downlink tocmai a adus un CMD_DOWN(RESET),
+         * nu mai dormim: ne intoarcem la inceputul buclei, TREJI, in
+         * DEV_STATE_IDLE. Un senzor care doarme 30 de secunde ar fi
+         * incomod de pus manual in pairing, iar calea normala de
+         * re-inrolare este tocmai `remove` pe hub urmat de apasarea
+         * butonului pe un senzor deja trezit.
+         */
+        if (deviceState != DEV_STATE_OPERATING)
+        {
+            continue;
+        }
+
+        /*
+         * --- Somnul pana la ciclul urmator --------------------------
+         * Abia AICI, dupa ce fereastra de downlink s-a inchis si
+         * eventualul CMD_DOWN a fost tratat. Somnul asezat intre
+         * transmisie si fereastra ar repeta exact F-032, si ar fi si mai
+         * grav: fereastra este singurul moment la ~30 de secunde in care
+         * hub-ul poate vorbi cu senzorul.
+         *
+         * Frame counter-ul ramane in RAM: SLEEP pastreaza RAM-ul si
+         * registrele, deci schema din F-022 este neatinsa - checkpoint o
+         * data la FCNT_CHECKPOINT_EVERY pachete, nu la fiecare ciclu.
+         */
+        if (loraReady != 0U)
+        {
+            LoRa_Sleep();
+        }
+
+        wokeBy = Sleep_Cycle();
+
+        if (wokeBy == SLEEP_WOKE_PAIR)
+        {
+            /*
+             * Trei secunde pe butonul 2 la un senzor DEJA inrolat inseamna
+             * "vreau sa ma inrolez din nou": stergem sesiunea si deschidem
+             * fereastra de pairing. Este comod la mutarea placii pe alt
+             * hub, dar inseamna si ca trei secunde de apasare accidentala
+             * scot senzorul din retea - de aceea pragul este de trei
+             * secunde si nu de o atingere.
+             */
+            if (ButtonPair_HeldLong() != 0U)
+            {
+                Nvm_EraseSession();
+                deviceState   = DEV_STATE_JOINING;
+                joinBackoffMs = JOIN_BACKOFF_START_MS;
+                joinAttempts  = 0U;
+            }
+        }
+        else if (wokeBy == SLEEP_WOKE_FORCE)
+        {
+            /* Butonul 1: transmitem imediat, cu REASON_BUTTON. */
+            if (Button_Pressed() != 0U)
+            {
+                forcedByButton = 1U;
+            }
+        }
+        else
+        {
+            /* Somn dus pana la capat: urmeaza o transmisie periodica. */
+        }
     }
 
     /* Nu se ajunge aici. */

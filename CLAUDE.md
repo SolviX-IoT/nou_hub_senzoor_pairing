@@ -20,7 +20,7 @@ europeana de **868 MHz**:
 
 | Nod | Hardware | Toolchain | Rol |
 |-----|----------|-----------|-----|
-| **Senzor** | PIC16LF1508 + RFM96 (SX1276) + NTC 10K 3950 + TPL5110 | MPLAB X IDE, compilator XC8, drivere MCC Melody | Se inroleaza la hub, apoi masoara temperatura si o trimite **criptata** prin LoRa |
+| **Senzor** | PIC16LF1508 + RFM96 (SX1276) + NTC 10K 3950 | MPLAB X IDE, compilator XC8, drivere MCC Melody | Se inroleaza la hub, apoi masoara temperatura si o trimite **criptata** prin LoRa. Inrolat, **doarme intre transmisii** (~30 s) |
 | **Hub** | ESP32 Dev Module + RFM96 (SX1276) + ENC28J60 | Arduino IDE | Inroleaza senzorii, tine registrul lor in NVS, primeste si decripteaza datele, poate dezinrola un device |
 
 Ambele module radio sunt SX1276, deci parametrii radio trebuie sa fie
@@ -45,7 +45,12 @@ Ambele module radio sunt SX1276, deci parametrii radio trebuie sa fie
    emitator; acum are si `LoRa_Receive()`.
 6. **Memorie ne-volatila pe senzor** — HEF (High-Endurance Flash), pentru
    identitate, cheie de sesiune si frame counter.
-7. **Pairing manual pe senzor** — senzorul nu se mai inroleaza singur.
+7. **Somn intre transmisii** — inrolat, senzorul nu mai sta in veghe:
+   ciclul este *masoara -> `DATA_ENC` -> fereastra de downlink -> radioul
+   in sleep -> microcontrolerul in sleep ~30 s -> trezire*. Somnul se
+   aplica **doar** in `DEV_STATE_OPERATING`; in repaus si in pairing
+   senzorul ramane treaz, ca butonul 2 sa raspunda normal.
+8. **Pairing manual pe senzor** — senzorul nu se mai inroleaza singur.
    Fara sesiune sta in repaus si tace; fereastra de pairing se deschide
    tinand **butonul 2 (RC5) apasat ~3 secunde**, iar LED2 clipeste cat
    este deschisa. Fereastra se inchide dupa `PAIRING_MAX_ATTEMPTS`
@@ -113,7 +118,7 @@ retea LoRa "de manual".
    | | flash (words) | RAM (octeti) |
    |---|---|---|
    | PIC16LF1508 are | 4096 (3968 utilizabili, HEF rezervat) | 256 |
-   | firmware-ul actual | **3921** (98.8%) | **233** (91.0%) |
+   | firmware-ul actual | **3757** (94.7%) | **231** (90.2%) |
 
    Cifra de 3761 de cuvinte / 250 de octeti din versiunile anterioare ale
    acestui fisier era masuratoarea de dinainte de F-029 (care a mutat
@@ -139,17 +144,28 @@ retea LoRa "de manual".
       maparea de pini din sectiunea 3 ramane valabila bit cu bit, dar
       `HEF_BASE` devine `0x1F80`.
 
-2. **Sleep-ul este DEZACTIVAT** (problema hardware la TPL5110, de rezolvat
-   ulterior). Senzorul ramane alimentat permanent, transmite pe intervalul
-   software existent (`TX_INTERVAL_MS`) si tine RC1 (DONE) **LOW
-   permanent** (F-018). RAM-ul se pastreaza intre transmisii, deci frame
-   counter-ul poate sta in RAM si se salveaza in HEF doar la fiecare
-   `FCNT_CHECKPOINT_EVERY` pachete.
-   **Cand TPL5110 se repara si sleep-ul se reactiveaza**, fiecare trezire
-   redevine cold boot cu RAM pierdut: counter-ul va trebui scris la
-   fiecare ciclu, inelul de sloturi din HEF va trebui marit (sau inlocuit
-   cu un FRAM extern), iar join-ul va trebui incadrat intr-o fereastra de
-   alimentare.
+2. **`SLEEP` nu este acelasi lucru cu taierea alimentarii.** Distinctia
+   asta decide schema frame counter-ului, si de aceea merita scrisa
+   raspicat.
+
+   **Ce se intampla acum:** inrolat, senzorul executa `SLEEP` intre
+   transmisii, ~30 s, si se trezeste pe watchdog. `SLEEP` pe PIC16
+   **pastreaza RAM-ul si registrele** — procesorul doar isi opreste
+   ceasul. Deci schema din F-022 ramane valabila **neschimbata**:
+   counter-ul traieste in RAM si se salveaza in HEF doar la fiecare
+   `FCNT_CHECKPOINT_EVERY` = 50 de pachete. **Nu** se scrie la fiecare
+   ciclu de somn; ar consuma HEF-ul degeaba.
+
+   **Ce ar fi altceva:** un regim in care **alimentarea se taie** intre
+   transmisii (un timer extern de tip PTC/latch care scoate VDD). Acolo
+   fiecare trezire ar fi un cold boot cu RAM-ul pierdut: counter-ul ar
+   trebui scris la fiecare ciclu, inelul de sloturi din HEF ar trebui
+   marit (sau inlocuit cu un FRAM extern), iar inrolarea ar trebui
+   incadrata intr-o fereastra de alimentare. **Nu este cazul astazi.**
+
+   Somnul se aplica doar in `DEV_STATE_OPERATING`. In `DEV_STATE_IDLE` si
+   in `DEV_STATE_JOINING` senzorul ramane treaz, fiindca acolo trebuie sa
+   asculte butonul 2 si sa poata face join.
 
 3. **Senzorul era doar TX, cu polling, fara DIO0 si fara RESET cablat.**
    Pentru pairing a trebuit adaugat mod RX in driver: `LoRa_Receive()`,
@@ -181,7 +197,7 @@ identice cu cele din `teste-sistemcomplet/`.
 | **RC5** | **Buton 2** — **tinut ~3 s deschide pairing-ul** (activ HIGH, pull-down extern) | intrare digitala | `TRISC5=1` | `main.c`, `ButtonPair_HeldLong()` |
 | **RC3** | **LED 1** — transmisie de date; aprins cat dureaza si fereastra de downlink (F-032) | iesire | `ANSC3=0`, `TRISC3=0` | `main.c` |
 | **RC6** | **LED 2** — pairing / eroare de join; **clipeste** cat fereastra de pairing e deschisa | iesire | `ANSC6=0`, `TRISC6=0` | `main.c` |
-| **RC1** | **TPL5110 DONE** | iesire, **LOW permanent** | `ANSC1=0`, `TRISC1=0` | `main.c` (F-018) |
+| **RC1** | **liber / neconectat** | intrare analogica (implicit MCC) | `ANSC1=1`, `TRISC1=1` din `pins.c`; **fara cod in `main.c`** | `pins.c` |
 | RA0 / RA1 | ICSPDAT / ICSPCLK (programare) | — | `LVP=ON` | `config_bits.c` |
 | RA3 | MCLR / VPP | intrare | `MCLRE=ON` | `config_bits.c` |
 
@@ -522,8 +538,7 @@ trebuie reinrolat o data, manual.
 | Fisier | Rol |
 |--------|-----|
 | `main.c` | **Firmware-ul complet**, in 16 sectiuni numerotate: parametri, pini, registre SX1276, protocol, HEF, XTEA/CBC-MAC/CTR, starea device-ului, NVM, driver LoRa (TX **si RX**), ADC+NTC, butoane (inclusiv `ButtonPair_HeldLong()` pentru pairing-ul manual), LED-uri, construirea pachetelor, initializare, inrolare, bucla principala cu cele trei stari `IDLE` / `JOINING` / `OPERATING`. |
-| `main_powercycle_test.c.bak` | Testul provizoriu de power-cycle prin TPL5110. Pastrat ca referinta pentru F-011…F-014. Extensia `.bak` il tine in afara compilarii, iar `nbproject/configurations.xml` listeaza oricum doar `main.c`. |
-| `mcc_generated_files/system/src/config_bits.c` | Configuration bits: `FOSC=INTOSC`, `WDTE=OFF`, `MCLRE=ON`, `BOREN=ON`, `LVP=ON`, `PWRTE=OFF`. **`WRT=OFF` este obligatoriu pentru HEF.** |
+| `mcc_generated_files/system/src/config_bits.c` | Configuration bits: `FOSC=INTOSC`, **`WDTE=SWDTEN`**, `MCLRE=ON`, `BOREN=ON`, `LVP=ON`, `PWRTE=OFF`. **`WRT=OFF` este obligatoriu pentru HEF.** `WDTE=SWDTEN` tine watchdog-ul stins in veghe (transmisia si scrierea in HEF sunt lungi si blocante) si il aprinde doar in jurul lui `SLEEP`, unde expirarea **trezeste** procesorul. **Fisier generat de MCC: o regenerare pune `WDTE` inapoi pe `OFF` si senzorul nu se mai trezeste.** |
 | `mcc_generated_files/system/src/clock.c`, `clock.h` | Oscilator intern la **16 MHz** (`_XTAL_FREQ = 16000000`). |
 | `mcc_generated_files/system/src/pins.c` | `PIN_MANAGER_Initialize()`: `TRISA=0x3F`, `TRISB=0xB0`, `TRISC=0x37`, `ANSELA=0x17`, `ANSELB=0x20`, `ANSELC=0x06`, pull-up-uri pe PORTA/PORTB. |
 | `mcc_generated_files/system/pins.h` | Macro-uri `IO_RCx_SetHigh/SetLow/GetValue/...`. |
@@ -531,7 +546,6 @@ trebuie reinrolat o data, manual.
 | `mcc_generated_files/system/src/system.c` | `SYSTEM_Initialize()` = clock + pini + SPI1 + intreruperi. |
 | `mcc_generated_files/system/src/interrupt.c` | Vector de intreruperi generat; **nu este folosit efectiv**. |
 | `nbproject/`, `Makefile*` | Fisiere de proiect MPLAB X. Doua setari sunt **obligatorii** si sunt deja aplicate in `configurations.xml`: `optimization-level = -O2` (cu `-O0` firmware-ul nu incape) si `code-model-rom = default,-f80-fff` (rezerva regiunea HEF, F-027). |
-| `Datasheets/TPL5110.PDF` | Datasheet-ul timerului de alimentare. |
 
 ### 8.2. `hub/SolvixHub_Tests/` — suita de teste ESP32
 
@@ -611,11 +625,15 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
 - **Fix:** se citeste `RegVersion (0x42)` si se cere `0x12`. Daca nu se potriveste, versiunea citita se **clipeste pe LED in hexazecimal** (`LoRa_ShowVersionError`), in loc sa se blocheze mut.
 
 ### F-011 — DONE ignorat de TPL5110 (senzor)
+> **ISTORIC.** TPL5110 a fost scos din proiectare la 2026-08-26 si nu mai
+> este pe placa. Intrarea se pastreaza pentru trasabilitatea etichetelor
+> F-0xx din mesajele de commit; codul descris aici nu mai exista.
 - **Simptom:** placa nu se oprea la apasarea butonului.
 - **Cauza:** TPL5110, sectiunea 8.5.2 din datasheet: "DONE signals received while the DELAY/M_DRV is HIGH are ignored". M_DRV are 20 ms de debounce pe ambele fronturi.
 - **Fix:** se asteapta eliberarea butonului, apoi `TPL5110_MDRV_SETTLE_MS = 60 ms`, abia apoi se semnaleaza DONE.
 
 ### F-012 — Un singur front DONE nu e suficient (senzor)
+> **ISTORIC.** Vezi nota de la F-011: TPL5110 nu mai este pe placa.
 - **Cauza:** DONE este declansat pe front (min. 100 ns) si doar primul front dintr-un interval este procesat.
 - **Fix:** se trimit **10 pulsuri** (`TPL5110_DONE_PULSES`) in loc de un singur nivel.
 
@@ -639,6 +657,11 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
 - **Fix:** intervalul de transmisie se obtine cu o bucla software de pasi de 10 ms, care permite si verificarea butonului intre pasi.
 
 ### F-018 — RC1 (DONE) trebuie tinut LOW cand timerul nu e folosit (senzor)
+> **ISTORIC.** TPL5110 a fost scos din proiectare la 2026-08-26. RC1 este
+> acum un pin liber, fara cod in `main.c`: ramane pe intrare analogica din
+> configuratia MCC, ceea ce pentru un pin neconectat este starea corecta -
+> bufferul digital este dezactivat, deci un nivel flotant nu consuma
+> curent.
 - **Problema:** codul nu face power-cycle, dar RC1 este in continuare legat la pinul DONE al TPL5110. Lasat flotant sau HIGH, ar putea taia alimentarea in mijlocul unei transmisii — sau, acum, in mijlocul unei scrieri in HEF, ceea ce ar lasa un rand pe jumatate scris.
 - **Fix:** `main()` configureaza RC1 ca iesire digitala si il tine **LOW permanent**.
 
@@ -927,12 +950,40 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
 - **Cum se verifica in trei secunde ce s-a programat:** raportul de
   memorie din fereastra de build, sau
   `senzor/dist/default/production/senzor.production.mum`, trebuie sa arate
-  cifra din sectiunea 11 (acum **3921** de cuvinte / 233 de octeti). Alta
+  cifra din sectiunea 11 (acum **3757** de cuvinte / 231 de octeti). Alta
   cifra inseamna alt cod decat cel din `main.c`, si nicio cautare in
   schema nu are rost pana nu se potriveste.
 - **De retinut:** cand o placa se poarta ca o versiune anterioara a
   firmware-ului, prima intrebare nu este "ce am gresit in cod", ci "ce cod
   este de fapt pe cip".
+
+### F-034 — Somnul senzorului ar fi rupt confirmarea dezinrolarii de pe hub
+- **Simptom (prins la proiectare, inainte de a ajunge pe placa):** dupa
+  introducerea somnului de ~30 s, un `remove <DevEUI>` ar fi raportat
+  `DEZINROLARE CONFIRMATA` in mijlocul unui somn normal, fara ca senzorul
+  sa fi primit vreun `RESET`. La trezire senzorul ar fi continuat sa emita
+  cu cheia veche, iar hub-ul — care tocmai stersese inregistrarea si cheia
+  — nu l-ar mai fi putut opri niciodata. Adica exact fundatura reparata de
+  F-031, de data asta fara nicio iesire din hub.
+- **Cauza:** `REMOVE_CONFIRM_SILENCE_MS` era 20 s, calibrata explicit
+  pentru "patru transmisii ratate la rand" la un interval de transmisie de
+  5 s. Mecanismul din F-031 foloseste **tacerea** ca dovada ca senzorul a
+  primit `RESET`-ul si a intrat in repaus. Un senzor care doarme tace si
+  el, si tace mai mult decat fereastra: 30 s de somn > 20 s de fereastra,
+  deci prima confirmare ar fi cazut inainte de prima trezire.
+- **Fix:** `REMOVE_CONFIRM_SILENCE_MS` a urcat la **120 s**, adica patru
+  cicluri de somn nominale (sau ~3,5 in cazul cel mai lent, fiindca WDT-ul
+  merge pe LFINTOSC cu toleranta larga). Perechea `SLEEP_WAKEUPS`
+  (senzor) <-> `REMOVE_CONFIRM_SILENCE_MS` (hub) a intrat in **regula 11**
+  din sectiunea 10, lista constantelor care se schimba obligatoriu pe
+  ambele capete.
+- **De retinut:** o schimbare care pare locala pe un nod poate invalida
+  tacut o presupunere de temporizare de pe celalalt. Aici presupunerea nu
+  era scrisa intr-un `#define` comun, ci intr-un **comentariu** care
+  spunea "patru transmisii la 5 secunde" — si comentariile nu dau erori de
+  compilare cand realitatea se schimba sub ele. Orice mecanism care
+  foloseste **absenta** unui semnal drept dovada trebuie recitit ori de
+  cate ori se schimba ritmul in care acel semnal apare.
 
 ---
 
@@ -963,6 +1014,13 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
     perechea DevEUI + AppKey (`PROVISIONED_DEVICES_INIT` /
     `PROVISION_DEV_EUI` + `PROVISION_APP_KEY`) si lungimile zonelor
     acoperite de MIC (`*_MIC_INPUT_LEN`, definite in ambele fisiere).
+    **Si perechea interval de somn <-> fereastra de confirmare:**
+    `SLEEP_WAKEUPS` (senzor/main.c) <-> `REMOVE_CONFIRM_SILENCE_MS`
+    (Config.h). Hub-ul confirma dezinrolarea prin tacere, iar un senzor
+    care doarme tace si el: daca somnul creste peste fereastra, hub-ul
+    sterge inregistrarea **si cheia** in timp ce senzorul doar doarme, si
+    nu il mai poate opri niciodata (F-031). Fereastra trebuie sa acopere
+    cel putin trei-patru cicluri de somn.
 12. **Cheile nu se afiseaza pe Serial.** `list` arata DevEUI si DevAddr,
     niciodata `SessKey` sau `AppKey`.
 13. **Un build de verificare nu scrie in `senzor/build/` sau
@@ -979,10 +1037,10 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
     proiectului**, nu editand fisierele: MPLAB X rescrie
     `Makefile-default.mk` la fiecare build (F-029). Dupa orice adaugare
     de cod pe senzor, **citeste raportul de memorie** — marja este de
-    **47 de cuvinte si 23 de octeti** (dupa F-032). Daca mai
-    e nevoie de spatiu, economia usoara ramasa este cea numita in F-028:
-    frame counter-ul se impacheteaza inca prin deplasari pe 32 de biti
-    (`Nvm_LoadFrameCounter` are singur 192 de cuvinte).
+    **211 cuvinte si 25 de octeti** (dupa F-034). Marja este acum
+    confortabila, fiindca `SPI1_Open` a iesit din legatura si frame
+    counter-ul a trecut pe `Word32` — cele doua economii pe care F-028 le
+    lasase scrise ca "inca netratat".
 15. **Pe senzor, evita `int32_t` in codul fierbinte** (F-028). O
     inmultire sau o impartire pe 32 de biti costa peste 100 de cuvinte de
     program pe PIC16. Foloseste uniunea `Word32` pentru conversii
@@ -1007,7 +1065,12 @@ mostenite din `teste-sistemcomplet/` si raman valabile.
 | Registrul hub-ului persista peste repornire | `DeviceRegistry` pe NVS |
 | Senzorul se inroleaza **doar la cererea explicita a utilizatorului** | `DEV_STATE_IDLE` este starea implicita in `senzor/main.c`; fereastra se deschide numai din `ButtonPair_HeldLong()` (butonul 2 tinut ~3 s) si se inchide dupa `PAIRING_MAX_ATTEMPTS` incercari |
 | Dupa `CMD_DOWN(RESET)` senzorul nu se re-inroleaza singur | ramura `CMD_TYPE_RESET` trece in `DEV_STATE_IDLE`, nu in `DEV_STATE_JOINING` |
-| Firmware-ul senzorului **incape** in PIC16LF1508 | **VERIFICAT** cu `xc8-cc` v3.10, `-O2`, cu HEF rezervat, in AMBELE configuratii: Production **3921** / 3968 words si **233** / 256 octeti, Debug cu Snap **3922** / 233. Ultimul cuvant de cod este la `0x0F7F` in ambele, deci regiunea HEF este curata. Marja ramasa: **47 de cuvinte**. A fost nevoie de trecerea de la AES la XTEA (F-024) plus reducerile din F-025, F-028, F-029 si F-030. |
+| Inrolat, senzorul **doarme** intre transmisii si nu mai asteapta activ | `Sleep_Cycle()` in `senzor/main.c`, chemata la finalul ciclului din `DEV_STATE_OPERATING`; trezire pe WDT, fara timer si fara rutina de intrerupere |
+| Somnul **nu** inghite fereastra de downlink | `Sleep_Cycle()` se cheama abia dupa ce fereastra de `DOWNLINK_WINDOW_MS` s-a inchis si eventualul `CMD_DOWN` a fost tratat (F-032) |
+| Butonul raspunde si in timpul somnului | somnul e fragmentat in `SLEEP_WAKEUPS` reprize de ~2,11 s, cu butoanele citite la fiecare trezire; RC5 este pe PORTC, iar acest device NU are interrupt-on-change pe PORTC |
+| Dupa `CMD_DOWN(RESET)` senzorul ramane **treaz** in repaus | bucla sare peste somn cand `deviceState != DEV_STATE_OPERATING`, deci reintra in `DEV_STATE_IDLE` cu latenta normala la buton |
+| Somnul nu strica anti-replay-ul | `SLEEP` pastreaza RAM-ul, deci frame counter-ul si schema de checkpoint din F-022 raman neschimbate |
+| Firmware-ul senzorului **incape** in PIC16LF1508 | **VERIFICAT** cu `xc8-cc` v3.10, `-O2`, cu HEF rezervat, in AMBELE configuratii: Production **3757** / 3968 words si **231** / 256 octeti, Debug cu Snap **3758** / 231. Ultimul cuvant de cod este la `0x0F7F` in ambele, deci regiunea HEF este curata. Marja ramasa: **211 cuvinte**. A fost nevoie de trecerea de la AES la XTEA (F-024) plus reducerile din F-025, F-028, F-029 si F-030. |
 
 ---
 
@@ -1086,9 +1149,53 @@ placa era programata cu cod vechi, fiindca build-urile de verificare a
 incadrarii scrisesera in `senzor/build/` si `senzor/dist/`, directoarele
 de lucru ale lui MPLAB X. *Clean* pe proiect a rezolvat.
 
+**2026-08-26 — TPL5110 scos din proiectare.** Componenta nu mai este pe
+placa, deci a disparut si din cod: cele trei scrieri de registre din
+`Board_Initialize()`, blocul de `#define` `TPL5110_DONE_*`, notele din
+antetul lui `main.c` si din sectiunea 5, testul
+`main_powercycle_test.c.bak` si datasheet-ul din `senzor/Datasheets/`
+(folderul a ramas gol si a fost sters). **RC1 este acum un pin liber si nu
+primeste cod**: ramane pe configuratia MCC din `pins.c`, adica intrare
+analogica, ceea ce pentru un pin neconectat este exact starea buna -
+bufferul digital de intrare este dezactivat, deci un nivel flotant nu
+consuma curent. F-011, F-012 si F-018 au fost marcate ca ISTORIC in loc sa
+fie sterse, ca etichetele din mesajele de commit sa ramana rezolvabile;
+F-013 si F-014 raman documentatie vie, fiindca lectiile lor nu tin de
+TPL5110. Castigul de memorie este cel asteptat de la trei scrieri de
+registre: **-5 cuvinte**, 3921 -> 3916. Ce ramane de facut manual:
+`PINOUT_config.pdf` inca arata RC1 -> TPL5110.
+
+**2026-08-26 — somn intre transmisii (F-034).** Inrolat, senzorul nu mai
+asteapta activ intre pachete: dupa fereastra de downlink adoarme radioul
+si apoi procesorul, ~29,6 s, si se trezeste pe watchdog. Somnul se aplica
+**doar** in `DEV_STATE_OPERATING`; in repaus si in pairing senzorul ramane
+treaz, iar dupa un `CMD_DOWN(RESET)` se intoarce treaz in
+`DEV_STATE_IDLE`, ca sa poata fi pus imediat in pairing de la buton.
+Somnul este fragmentat in 14 reprize de ~2,11 s fiindca RC5 este pe PORTC,
+iar `pic16lf1508.h` nu are niciun registru `IOCC*`: interrupt-on-change
+exista doar pe PORTA si PORTB, deci un senzor adormit nu poate fi trezit
+de buton. `WDTE` a trecut de la `OFF` la `SWDTEN`, ca watchdog-ul sa fie
+pornit numai in jurul lui `SLEEP`.
+
+Ca sa incapa, a fost nevoie intai de o faza de curatenie: `SPI1_Open` a
+iesit din legatura (MSSP-ul se deschide scriind direct cele cinci
+registre, in loc sa indexeze tabelul MCC pentru o singura configuratie),
+iar frame counter-ul a trecut pe uniunea `Word32` in cele trei locuri unde
+se impacheta big-endian cu deplasari pe 32 de biti — economia pe care
+F-028 o lasase scrisa ca "inca netratat". Cele doua au eliberat impreuna
+**186 de cuvinte**, 3916 -> 3730, iar somnul a costat 27, deci firmware-ul
+a ajuns la 3757 cu 211 cuvinte marja.
+
+Pe hub s-a schimbat **exact o constanta**, dar una critica:
+`REMOVE_CONFIRM_SILENCE_MS` a urcat de la 20 s la 120 s. Hub-ul confirma
+dezinrolarea prin tacere, iar un senzor care doarme tace si el: la 20 s
+hub-ul ar fi sters inregistrarea **si cheia** in mijlocul unui somn
+normal, si nu ar mai fi putut opri senzorul niciodata — fundatura din
+F-031. Perechea a intrat in regula 11 din sectiunea 10.
+
 **Starea curenta**, masurata cu `xc8-cc` v3.10, `-O2`, cu HEF rezervat, in
-ambele configuratii: **3921 / 3968 cuvinte utilizabile si 233 / 256
-octeti** (Debug cu Snap: 3922 / 233). Ultimul cuvant de cod este la
-`0x0F7F`, deci regiunea HEF este curata. Marja: 47 de cuvinte si 23 de
+ambele configuratii: **3757 / 3968 cuvinte utilizabile si 231 / 256
+octeti** (Debug cu Snap: 3758 / 231). Ultimul cuvant de cod este la
+`0x0F7F`, deci regiunea HEF este curata. Marja: 211 cuvinte si 25 de
 octeti. Sketch-ul hub-ului compileaza pentru ESP32 Dev Module fara erori
 si fara warning-uri proprii (cele 5 raman din `EthernetENC` si `LoRa`).

@@ -21,9 +21,17 @@ hub-ului sunt in [hub/SolvixHub_Tests/README.md](hub/SolvixHub_Tests/README.md).
    `JOIN_ACCEPT`.
 4. Senzorul salveaza cheia in HEF si trimite de aici incolo temperatura
    ca `DATA_ENC`: XTEA-CTR pe payload, CBC-MAC-XTEA pentru autenticitate,
-   frame counter strict crescator impotriva replay-ului.
-5. `remove <DevEUI>` scoate un senzor din retea: la primul lui contact
-   primeste `CMD_DOWN(RESET)`, isi sterge cheia si revine la pairing.
+   frame counter strict crescator impotriva replay-ului. Intre doua
+   pachete **doarme ~30 de secunde** si se trezeste pe watchdog; butonul
+   este citit la fiecare trezire, deci raspunde in cel mult ~2 secunde.
+5. `remove <DevEUI>` scoate un senzor din retea. Hub-ul ii trimite
+   `CMD_DOWN(RESET)` la **fiecare** pachet al lui si sterge inregistrarea
+   abia dupa ce senzorul tace — tacerea este dovada ca a primit comanda
+   (F-031). Senzorul isi sterge cheia si ramane **in repaus**.
+
+Pasii 1 si 2 cer amandoi o interventie umana: senzorul trimite `JOIN_REQ`
+doar dupa ce i se tine butonul 2 (RC5) apasat ~3 secunde, iar hub-ul il
+asculta doar in fereastra deschisa cu `pair` (F-030).
 
 Dupa decriptare, payload-ul este **exact acelasi pachet de 6 octeti** ca
 inainte, deci trece prin acelasi cod de interpretare a temperaturii.
@@ -41,8 +49,8 @@ inainte, deci trece prin acelasi cod de interpretare a temperaturii.
 | configuratie | flash (words) | RAM (octeti) |
 |---|---|---|
 | PIC16LF1508 are | 4096 (3968 utilizabili, HEF rezervat) | 256 |
-| Production, `-O2` | **3843** | **231** |
-| Debug cu Snap, `-O2` | **3844** | **231** (16 sunt ai depanatorului) |
+| Production, `-O2` | **3757** | **231** |
+| Debug cu Snap, `-O2` | **3758** | **231** (16 sunt ai depanatorului) |
 
 Cifrele sunt din `xc8-cc` v3.10.
 

@@ -140,12 +140,24 @@ extern byte HUB_MAC[6];
 // repaus, de unde nu mai emite nimic (F-030). Cat timp inca se aude,
 // inseamna ca nu a primit comanda si i se retrimite (F-031).
 //
-// Senzorul transmite la TX_INTERVAL_MS = 5000 ms (senzor/main.c), deci
-// 20 s inseamna patru transmisii ratate la rand. Mai putin ar sterge
-// inregistrarea la prima coliziune radio, iar odata cu ea am pierde
-// cheia de sesiune - adica singurul mod de a-i mai trimite un RESET.
-// Mai mult doar intarzie reinrolarea.
-#define REMOVE_CONFIRM_SILENCE_MS 20000UL
+// **ACEASTA CONSTANTA ESTE LEGATA DE INTERVALUL DE SOMN AL SENZORULUI.**
+// Senzorul nu mai este in veghe continua: intre doua pachete doarme
+// SLEEP_WAKEUPS x o perioada WDT (senzor/main.c), adica ~29,6 s nominal,
+// si 25-34 s in realitate, fiindca WDT-ul merge pe LFINTOSC cu toleranta
+// larga. Un senzor adormit TACE - exact semnalul pe care hub-ul il
+// foloseste ca dovada ca a primit RESET-ul.
+//
+// Valoarea trebuie deci sa acopere confortabil mai multe cicluri de somn:
+// 120 s inseamna patru cicluri nominale, sau ~3,5 in cazul cel mai lent.
+// Prea mica este PERICULOS, nu doar incomod: hub-ul ar declara
+// dezinrolarea confirmata in timp ce senzorul doar doarme, ar sterge
+// inregistrarea SI cheia de sesiune, iar la trezire senzorul ar emite cu
+// cheia veche fara ca hub-ul sa-l mai poata opri vreodata - fundatura din
+// F-031, de data asta fara iesire. Prea mare doar intarzie reinrolarea.
+//
+// Daca schimbi SLEEP_WAKEUPS pe senzor, schimbi si valoarea de aici
+// (regula 11 din CLAUDE.md, sectiunea 10).
+#define REMOVE_CONFIRM_SILENCE_MS 120000UL
 
 // 1 = dupa o dezinrolare CONFIRMATA, hub-ul redeschide singur fereastra
 //     de pairing, ca operatorul sa nu alerge inapoi la tastatura.

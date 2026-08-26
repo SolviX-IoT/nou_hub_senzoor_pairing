@@ -37,7 +37,15 @@
 
 //CONFIG1
 #pragma config FOSC = INTOSC    // Oscillator Selection->INTOSC oscillator: I/O function on CLKIN pin
-#pragma config WDTE = OFF    // Watchdog Timer Enable->WDT disabled
+// ATENTIE: fisier GENERAT DE MCC. O regenerare pune WDTE inapoi pe OFF, si
+// senzorul nu se mai trezeste din somn.
+//
+// WDTE = SWDTEN tine watchdog-ul stins cat timp senzorul este treaz - unde
+// transmisia, fereastra de receptie si scrierea in HEF sunt lungi si blocante,
+// iar un WDT pornit le-ar reseta - si il aprinde doar in jurul instructiunii
+// SLEEP, unde expirarea TREZESTE procesorul in loc sa il reseteze.
+// WRT trebuie sa ramana OFF, altfel HEF-ul nu se mai poate scrie.
+#pragma config WDTE = SWDTEN    // Watchdog Timer Enable->WDT controlat din software (WDTCONbits.SWDTEN)
 #pragma config PWRTE = OFF    // Power-up Timer Enable->PWRT disabled
 #pragma config MCLRE = ON    // MCLR Pin Function Select->MCLR/VPP pin function is MCLR
 #pragma config CP = OFF    // Flash Program Memory Code Protection->Program memory code protection is disabled

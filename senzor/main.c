@@ -123,15 +123,55 @@
  * WDTCON, dar se scrie explicit ca sa nu depinda de ea.
  */
 #define SLEEP_WDT_WDTPS         0x0BU   /* 1:65536 -> ~2,11 s */
-#define SLEEP_WAKEUPS           14U     /* 14 x ~2,11 s = ~29,6 s */
 
 /*
- * LFINTOSC are toleranta larga (ordinul a +-15%), deci intervalul real
- * de somn este de ordinul 25-34 s, nu fix 29,6. Cine schimba
- * SLEEP_WAKEUPS trebuie sa schimbe si REMOVE_CONFIRM_SILENCE_MS din
- * hub/SolvixHub_Tests/Config.h: hub-ul confirma dezinrolarea prin tacere,
- * iar un senzor care doarme tace si el (F-031, regula 11 din CLAUDE.md).
+ * --- Durata somnului: NU este aceeasi pe toti senzorii ---------------
+ *
+ * Pe canal sunt acum pana la HUB_MAX_SENSORS = 5 placi si un singur hub.
+ * Radioul este half-duplex si nu are captura garantata la puteri
+ * apropiate: doua pachete care se suprapun in aer se pierd amandoua. Un
+ * DATA_ENC de 17 octeti sta pe aer ~46 ms, iar un senzor emite o data la
+ * ~30 s, deci ocuparea este de 0,15% per placa - o coliziune
+ * INTAMPLATOARE este rara si nu deranjeaza pe nimeni, fiindca
+ * urmatoarea masuratoare vine oricum peste jumatate de minut.
+ *
+ * Pericolul real nu este coliziunea intamplatoare, ci COLIZIUNEA
+ * BLOCATA: doi senzori cu EXACT acelasi interval care s-au ciocnit o
+ * data raman ciocniti la nesfarsit, fiindca amandoi se deplaseaza cu
+ * acelasi pas. Cu un interval fix de 14 treziri pe toate placile, exact
+ * asta s-ar fi intamplat, iar cele doua ar fi disparut in perechi din
+ * jurnalul hub-ului fara nicio eroare vizibila.
+ *
+ * Se rup deci amandoua conditiile, cu doua masuri care costa impreuna
+ * cateva zeci de cuvinte de program:
+ *
+ *  1) INTERVAL PROPRIU FIECARUI SENZOR. La baza se adauga (DevAddr - 1)
+ *     treziri. DevAddr este numarul senzorului, alocat de hub din
+ *     pozitia in tabelul de provisioning (1..5), deci fiecare placa are
+ *     alt interval nominal: 23,2 / 25,3 / 27,4 / 29,6 / 31,7 s. Doi
+ *     senzori ciocniti se despart de la sine dupa o singura perioada.
+ *
+ *  2) JITTER ALEATOR PE FIECARE CICLU. Peste asta se adauga 0..3 treziri
+ *     dintr-un LFSR de 8 biti (Rand8), semanat din DevEUI si din frame
+ *     counter-ul citit din HEF. Chiar daca doua placi ar nimeri acelasi
+ *     numar de treziri intr-un ciclu, in ciclul urmator nu mai sunt la
+ *     fel. Jitter-ul rezolva si pornirea simultana dupa o pana de
+ *     curent, cand toate placile inrolate emit prima data in acelasi
+ *     moment.
+ *
+ * Media pe cele 5 adrese iese ~30,6 s, adica exact ritmul dinainte: s-a
+ * schimbat imprastierea, nu debitul.
+ *
+ * LFINTOSC are toleranta larga (ordinul a +-15%), care se adauga peste
+ * jitter: intervalul real al senzorului cu adresa 5 urca pana la ~44 s.
+ * Cine schimba oricare dintre cele trei constante de mai jos trebuie sa
+ * schimbe si REMOVE_CONFIRM_SILENCE_MS din hub/SolvixHub_Tests/Config.h:
+ * hub-ul confirma dezinrolarea prin tacere, iar un senzor care doarme
+ * tace si el (F-031, F-034, regula 11 din CLAUDE.md).
  */
+#define SLEEP_WAKEUPS_BASE      11U     /* 11 x ~2,11 s = ~23,2 s      */
+#define SLEEP_SLOT_MASK         0x07U   /* (DevAddr-1) & 7 -> 0..7     */
+#define SLEEP_JITTER_MASK       0x03U   /* Rand8() & 3    -> 0..3      */
 
 /* Pasul buclelor de asteptare din veghe (asteptarea eliberarii unui
  * buton, fereastra de receptie). Cu cat e mai mic, cu atat butonul e
@@ -219,23 +259,73 @@
  *     ne-inrolat nu are ce cauta pe frecventa cu date in clar. */
 #define ENABLE_PLAIN_TEMP       0
 
-/* --- Provisioning: SE SCHIMBA LA FIECARE PLACA --------------------- */
+/* --- Provisioning: SINGURUL LUCRU DE SCHIMBAT LA FIECARE PLACA ------ */
 
-/* DevEUI, 8 octeti. PIC16LF1508 nu are un ID unic garantat, deci
- * identitatea se provizioneaza aici si se scrie in HEF la prima pornire.
- * Aceeasi valoare trebuie trecuta in tabelul PROVISIONED_DEVICES din
- * hub/SolvixHub_Tests/Config.h. */
+/*
+ * NUMARUL SENZORULUI, 1..5. Este singura linie care se modifica intre
+ * cele cinci placi: din el ies si DevEUI, si AppKey, prin blocul de mai
+ * jos. Inainte se editau doua tabele de octeti la fiecare placa, iar o
+ * singura cifra gresita intr-unul din ele dadea acelasi simptom ca o
+ * cheie complet gresita: "MIC gresit", fara alt indiciu.
+ *
+ * Acelasi numar il primeste placa si ca DevAddr de la hub. Hub-ul NU mai
+ * aloca prima adresa libera, ci POZITIA din tabelul de provisioning din
+ * hub/SolvixHub_Tests/Config.h (DeviceRegistry::addressForEui). Senzorul
+ * cu SENSOR_NODE_ID = 3 este deci intotdeauna "Senzor #3" in jurnalul
+ * hub-ului, indiferent in ce ordine s-au inrolat placile si indiferent
+ * de cate ori s-a golit registrul. Din DevAddr iese si slotul de somn de
+ * mai sus, deci numarul chiar face doua treburi, nu este o eticheta.
+ */
+#define SENSOR_NODE_ID          3
+
+#if (SENSOR_NODE_ID < 1) || (SENSOR_NODE_ID > 5)
+#error "SENSOR_NODE_ID trebuie sa fie intre 1 si 5 (vezi HUB_MAX_SENSORS)."
+#endif
+
+/*
+ * DevEUI, 8 octeti: "SOLVIX" in ASCII, apoi 0x00 si numarul placii.
+ * PIC16LF1508 nu are un ID unic garantat, deci identitatea se
+ * provizioneaza aici si se scrie in HEF la prima pornire.
+ *
+ * AppKey, 16 octeti: DIFERITA la fiecare placa. Nu circula niciodata
+ * prin aer - serveste doar la semnarea JOIN_REQ, la cifrarea
+ * JOIN_ACCEPT si la derivarea SessKey. Cheile de mai jos sunt cele de
+ * DEZVOLTARE, aceleasi ca in PROVISIONED_DEVICES_INIT din Config.h;
+ * inainte de punerea in exploatare se inlocuiesc, tot in pereche.
+ *
+ * Doar ramura placii curente se compileaza, deci cele patru chei
+ * nefolosite nu costa niciun cuvant de program.
+ */
 #define PROVISION_DEV_EUI       { 0x53U, 0x4FU, 0x4CU, 0x56U, \
-                                  0x49U, 0x58U, 0x00U, 0x01U }
+                                  0x49U, 0x58U, 0x00U,        \
+                                  (uint8_t)SENSOR_NODE_ID }
 
-/* AppKey, 16 octeti. NU circula niciodata prin aer: serveste doar la
- * semnarea JOIN_REQ, la cifrarea JOIN_ACCEPT si la derivarea SessKey.
- * Trebuie sa fie unica per senzor si identica cu cea din tabelul
- * hub-ului. */
+#if   SENSOR_NODE_ID == 1
 #define PROVISION_APP_KEY       { 0x00U, 0x11U, 0x22U, 0x33U, \
                                   0x44U, 0x55U, 0x66U, 0x77U, \
                                   0x88U, 0x99U, 0xAAU, 0xBBU, \
                                   0xCCU, 0xDDU, 0xEEU, 0xFFU }
+#elif SENSOR_NODE_ID == 2
+#define PROVISION_APP_KEY       { 0x2AU, 0x7FU, 0x13U, 0xC4U, \
+                                  0x9EU, 0x06U, 0xB8U, 0x51U, \
+                                  0x3DU, 0xE2U, 0x74U, 0xAFU, \
+                                  0x60U, 0x1CU, 0x95U, 0xD8U }
+#elif SENSOR_NODE_ID == 3
+#define PROVISION_APP_KEY       { 0x5BU, 0x08U, 0xE1U, 0x96U, \
+                                  0x34U, 0xCDU, 0x72U, 0xAFU, \
+                                  0x1EU, 0x60U, 0xB5U, 0x27U, \
+                                  0xD9U, 0x43U, 0x8CU, 0xF0U }
+#elif SENSOR_NODE_ID == 4
+#define PROVISION_APP_KEY       { 0x91U, 0x4CU, 0x26U, 0xD3U, \
+                                  0x5FU, 0xA8U, 0x07U, 0xEBU, \
+                                  0x62U, 0x1DU, 0xB4U, 0x78U, \
+                                  0x3AU, 0xC5U, 0xE9U, 0x20U }
+#else
+#define PROVISION_APP_KEY       { 0xC7U, 0x3EU, 0x8AU, 0x15U, \
+                                  0xD0U, 0x6BU, 0xF2U, 0x49U, \
+                                  0xA3U, 0x5CU, 0x91U, 0x2EU, \
+                                  0x87U, 0xF6U, 0x04U, 0xBDU }
+#endif
 
 /* =====================================================================
  * 2. MAPAREA PINILOR
@@ -952,9 +1042,26 @@ static uint8_t Mic_Matches(const uint8_t *received, const uint8_t *computed)
 /*
  * Identitatea: DevEUI + AppKey, amandoua in acelasi rand. Daca randul
  * este gol (marcaj lipsa), se scriu valorile de compilare din
- * PROVISION_*. Asa o placa noua se auto-provizioneaza la prima pornire,
- * iar la urmatoarele se citeste ce e deja scris - inclusiv daca cineva a
- * programat HEF-ul separat.
+ * PROVISION_*. Asa o placa noua se auto-provizioneaza la prima pornire.
+ *
+ * DACA RANDUL EXISTA DAR CONTINE ALT DevEUI, se rescrie tot. Cazul apare
+ * exact cand o placa deja folosita este reprogramata cu alt
+ * SENSOR_NODE_ID - de exemplu fiindca senzorul #2 s-a ars si i se ia
+ * locul cu o placa de rezerva. Fara verificarea asta, HEF-ul ar pastra
+ * identitatea VECHE si placa ar continua sa se prezinte cu numarul
+ * vechi, in timp ce firmware-ul de pe ea spune altceva: pe hub s-ar
+ * vedea "MIC gresit" (cheia compilata nu se mai potriveste cu DevEUI-ul
+ * din HEF) si nicio cautare in cod nu ar duce nicaieri, fiindca sursa
+ * este corecta. Este acelasi gen de capcana ca F-033, dar cu starea
+ * ne-volatila in loc de directorul de build.
+ *
+ * Odata cu identitatea se sterge si SESIUNEA: o cheie de sesiune este
+ * legata de identitatea cu care a fost negociata, deci nu mai are ce
+ * cauta acolo. Placa porneste in DEV_STATE_IDLE si asteapta o inrolare
+ * noua, ceea ce si trebuie.
+ *
+ * Verificarea nu costa o scriere in plus la fiecare pornire: se compara
+ * doar, si se scrie exclusiv cand chiar difera.
  *
  * DevEUI ajunge in RAM, fiindca intra in fiecare JOIN_REQ. AppKey NU:
  * ramane doar in HEF si se citeste de acolo direct in cifru, in
@@ -966,18 +1073,34 @@ static void Nvm_LoadOrCreateProvisioning(void)
     static const uint8_t defaultKey[CRYPTO_KEY_LEN] = PROVISION_APP_KEY;
 
     uint8_t i;
+    uint8_t same;
 
     if (HEF_ReadByte(HEF_ROW_IDENTITY) == HEF_MAGIC_PROV)
     {
+        same = 1U;
+
         for (i = 0U; i < DEV_EUI_LEN; i++)
         {
             devEui[i] = HEF_ReadByte((uint16_t)(HEF_ROW_IDENTITY +
                                                 HEF_OFF_EUI + i));
+            if (devEui[i] != defaultEui[i])
+            {
+                same = 0U;
+            }
         }
-        return;
+
+        if (same != 0U)
+        {
+            return;
+        }
+
+        /* Placa a fost reprogramata cu alt SENSOR_NODE_ID: sesiunea
+         * veche apartine identitatii vechi. */
+        HEF_EraseRow(HEF_ROW_SESSION);
     }
 
-    /* Rand gol: il umplem cu valorile de compilare. */
+    /* Rand gol, sau identitate schimbata: il umplem cu valorile de
+     * compilare. */
     for (i = 0U; i < DEV_EUI_LEN; i++)
     {
         devEui[i] = defaultEui[i];
@@ -1311,13 +1434,32 @@ static uint8_t LoRa_SendBuffer(const uint8_t *data, uint8_t length)
  *   - citirea din FIFO de la FifoRxCurrentAddr, cu lungimea din
  *     RegRxNbBytes.
  *
- * Intoarce 1 daca s-a primit un pachet cu CRC bun, iar "*length"
- * primeste numarul de octeti cititi (cel mult maxLength).
- * Un pachet cu CRC gresit este numarat ca esec, dar receptia continua
- * pana la expirarea timpului.
+ * "wantType" ESTE OBLIGATORIU SI NU ESTE O COMODITATE. Cat timp exista
+ * un singur senzor, orice pachet auzit in fereastra proprie era, prin
+ * constructie, raspunsul hub-ului. Cu HUB_MAX_SENSORS = 5 placi pe
+ * acelasi canal, in fereastra de 600 ms a senzorului A poate intra la
+ * fel de bine un CMD_DOWN adresat lui B: fara filtru, functia s-ar
+ * intoarce cu ACEL pachet, apelantul l-ar respinge (MIC-ul sau adresa nu
+ * se potrivesc) si fereastra s-ar fi INCHIS DEJA. Senzorul A si-ar rata
+ * propriul raspuns, iar pe calea de dezinrolare asta inseamna exact
+ * fundatura din F-031: un RESET are o singura sansa per ciclu.
+ *
+ * Filtrul este deci parte din functionalitate, nu o optimizare:
+ * pachetele care nu ne apartin sunt aruncate SI receptia continua cu
+ * timpul ramas, exact ca la un CRC gresit. Se verifica magic-ul, tipul
+ * si - pentru CMD_DOWN, singurul tip care poarta adresa in clar -
+ * DevAddr. MIC-ul ramane treaba apelantului: el are cheia.
+ *
+ * Al doilea filtru, gratuit, este hardware: RegMaxPayloadLength = 16
+ * (sectiunea 3), iar DATA_ENC are 17 octeti. Modemul arunca singur
+ * pachetele de date ale celorlalti senzori, inainte sa ajunga la noi.
+ *
+ * Intoarce 1 daca s-a primit un pachet cu CRC bun SI de tipul cerut, iar
+ * "*length" primeste numarul de octeti cititi (cel mult maxLength).
  */
 static uint8_t LoRa_Receive(uint8_t *buffer, uint8_t maxLength,
-                            uint8_t *length, uint16_t timeoutMs)
+                            uint8_t *length, uint16_t timeoutMs,
+                            uint8_t wantType)
 {
     uint16_t waited;
     uint8_t  flags;
@@ -1360,6 +1502,19 @@ static uint8_t LoRa_Receive(uint8_t *buffer, uint8_t maxLength,
             for (i = 0U; i < received; i++)
             {
                 buffer[i] = LoRa_ReadRegister(LORA_REG_FIFO);
+            }
+
+            /* Filtrul multi-senzor. Un pachet strain este aruncat si
+             * receptia CONTINUA, cu timpul ramas: fereastra nu are voie
+             * sa fie consumata de vorba altcuiva. */
+            if ((received < 3U) ||
+                (buffer[0] != LORA_PACKET_MAGIC) ||
+                (buffer[1] != wantType) ||
+                ((wantType == MSG_TYPE_CMD_DOWN) && (buffer[2] != devAddr)))
+            {
+                LoRa_WriteRegister(LORA_REG_IRQ_FLAGS, 0xFFU);
+                __delay_ms(1);
+                continue;
             }
 
             *length = received;
@@ -2071,6 +2226,57 @@ static void Wait_PairingBlink(uint16_t milliseconds)
 }
 
 /*
+ * Generator pseudo-aleator de un octet: LFSR Galois cu polinomul
+ * x^8 + x^6 + x^5 + x^4 + 1 (masca 0xB8), perioada 255.
+ *
+ * Nu are nicio pretentie criptografica si nu are voie sa capete una:
+ * DevNonce-ul de la inrolare se face in continuare din zgomotul ADC
+ * (Nonce_Generate), fiindca acolo repetarea unei valori chiar
+ * inseamna ceva. Aici scopul este strict sa imprastie momentul
+ * transmisiei intre cei 5 senzori, si pentru asta o secventa
+ * previzibila dar DIFERITA de la placa la placa este exact ce trebuie.
+ *
+ * Costa 1 octet de RAM si o mana de instructiuni; o varianta pe 16 biti
+ * ar fi fost mai lunga fara sa imprastie mai bine cele 4 valori de
+ * jitter de care avem nevoie.
+ */
+static uint8_t rngState = 0xA5U;
+
+static uint8_t Rand8(void)
+{
+    if ((rngState & 0x01U) != 0U)
+    {
+        rngState = (uint8_t)((uint8_t)(rngState >> 1) ^ 0xB8U);
+    }
+    else
+    {
+        rngState = (uint8_t)(rngState >> 1);
+    }
+
+    return rngState;
+}
+
+/*
+ * Semanarea generatorului, chemata o singura data la pornire, dupa ce
+ * DevEUI si frame counter-ul au fost citite din HEF.
+ *
+ * Cele doua surse se completeaza: DevEUI face ca doua placi pornite in
+ * aceeasi secunda sa nu produca aceeasi secventa, iar frame counter-ul
+ * face ca ACEEASI placa sa nu reia aceeasi secventa dupa fiecare reset.
+ * Zero este singura stare interzisa a unui LFSR (ramane blocata), deci
+ * se inlocuieste.
+ */
+static void Rand_Seed(void)
+{
+    rngState = (uint8_t)(devEui[DEV_EUI_LEN - 1U] ^ (uint8_t)frameCounter);
+
+    if (rngState == 0U)
+    {
+        rngState = 0xA5U;
+    }
+}
+
+/*
  * Somnul dintre doua transmisii, valabil DOAR in DEV_STATE_OPERATING.
  *
  * Trezirea o da watchdog-ul: la expirare in timpul lui SLEEP, WDT-ul
@@ -2099,8 +2305,25 @@ static void Wait_PairingBlink(uint16_t milliseconds)
 static uint8_t Sleep_Cycle(void)
 {
     uint8_t ticks;
+    uint8_t wakeups;
 
-    for (ticks = 0U; ticks < SLEEP_WAKEUPS; ticks++)
+    /*
+     * Durata somnului se recalculeaza la FIECARE ciclu, si de aceea
+     * calculul sta aici si nu la inrolare:
+     *   baza      - comuna tuturor placilor;
+     *   slotul    - (DevAddr-1), fix pentru placa asta, deci fiecare
+     *               senzor are alt interval nominal;
+     *   jitter-ul - 0..3 treziri, altul la fiecare ciclu.
+     * Masca de pe slot nu este cosmetica: daca cineva reduce
+     * HUB_MAX_SENSORS sau ramane in registru o adresa mare dintr-o
+     * versiune veche a hub-ului, ea tine somnul in domeniul util in loc
+     * sa il faca de zeci de minute.
+     */
+    wakeups = (uint8_t)(SLEEP_WAKEUPS_BASE
+                        + ((uint8_t)(devAddr - 1U) & SLEEP_SLOT_MASK)
+                        + (uint8_t)(Rand8() & SLEEP_JITTER_MASK));
+
+    for (ticks = 0U; ticks < wakeups; ticks++)
     {
         CLRWDT();
         WDTCONbits.SWDTEN = 1;
@@ -2148,9 +2371,13 @@ static uint8_t Join_Attempt(void)
         return 0U;
     }
 
-    /* Fereastra de receptie pentru JOIN_ACCEPT. */
+    /* Fereastra de receptie pentru JOIN_ACCEPT. Filtrul pe tip arunca
+     * JOIN_REQ-urile altor senzori care se inroleaza in aceeasi
+     * fereastra a hub-ului; un JOIN_ACCEPT adresat altcuiva nu poate fi
+     * filtrat aici, fiindca DevAddr circula cifrat, dar pica la MIC in
+     * Packet_ParseJoinAccept. */
     if (LoRa_Receive(rxBuffer, LORA_RX_BUFFER_LEN, &length,
-                     JOIN_RX_TIMEOUT_MS) == 0U)
+                     JOIN_RX_TIMEOUT_MS, MSG_TYPE_JOIN_ACCEPT) == 0U)
     {
         LED2_LAT = 0;
         return 0U;
@@ -2214,6 +2441,10 @@ int main(void)
      */
     frameCounter += FCNT_CHECKPOINT_EVERY;
     fcntSinceCheckpoint = 0UL;
+
+    /* Acum avem si DevEUI, si counter-ul: putem semana jitter-ul de somn
+     * cu ceva ce difera si intre placi, si intre porniri. */
+    Rand_Seed();
 
     if (Nvm_LoadSession() != 0U)
     {
@@ -2370,7 +2601,7 @@ int main(void)
                  * deci fereastra poate fi scurta. */
                 rxLength = 0U;
                 if (LoRa_Receive(rxBuffer, LORA_RX_BUFFER_LEN, &rxLength,
-                                 DOWNLINK_WINDOW_MS) != 0U)
+                                 DOWNLINK_WINDOW_MS, MSG_TYPE_CMD_DOWN) != 0U)
                 {
                     command = Packet_ParseCommand(rxBuffer, rxLength);
 

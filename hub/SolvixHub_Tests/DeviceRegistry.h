@@ -23,6 +23,27 @@
   registrul: ea spune CINE ARE VOIE sa se inroleze si sta in Config.h,
   compilata in program. Registrul spune CINE S-A INROLAT DEJA si traieste
   in NVS.
+
+  ---------------------------------------------------------------------
+  NUMEROTAREA SENZORILOR
+  ---------------------------------------------------------------------
+  Reteaua are pana la HUB_MAX_SENSORS placi, iar fiecare are un NUMAR
+  stabil, 1..HUB_MAX_SENSORS. Numarul NU este o eticheta pusa pe deasupra:
+  este chiar DevAddr-ul din protocol, adica octetul [2] al fiecarui
+  DATA_ENC si al fiecarui CMD_DOWN.
+
+  Numarul vine din POZITIA senzorului in tabelul PROVISIONED_DEVICES_INIT
+  din Config.h, nu din ordinea inrolarii (addressForEui). Asta inseamna:
+
+    - senzorul de pe randul 3 este "Senzor #3" la prima inrolare, dupa o
+      dezinrolare si o reinrolare, si dupa o golire completa a
+      registrului;
+    - doua placi nu pot primi niciodata acelasi numar;
+    - operatorul poate scrie "3" pe cutie si numarul ramane adevarat.
+
+  Acelasi numar il stie si placa: este SENSOR_NODE_ID din senzor/main.c,
+  din care ies acolo DevEUI, AppKey si slotul de somn care o desincro-
+  nizeaza de celelalte. Randul N din tabel <-> placa cu SENSOR_NODE_ID N.
 */
 
 #ifndef DEVICE_REGISTRY_H
@@ -44,7 +65,12 @@ struct ProvisionedDevice {
 // in DeviceRegistry.cpp).
 struct DeviceRecord {
   uint8_t  devEui[DEV_EUI_LEN];
+
+  // Numarul senzorului, 1..HUB_MAX_SENSORS, si in acelasi timp adresa
+  // lui din protocol. Vine din pozitia in tabelul de provisioning, deci
+  // este stabil peste reinrolari si peste golirea registrului.
   uint8_t  devAddr;
+
   uint8_t  sessKey[CRYPTO_KEY_LEN];
 
   // Ultimul frame counter acceptat de la senzor. Un pachet cu o valoare
@@ -64,6 +90,14 @@ struct DeviceRecord {
 
   // Cate pachete de date valide au venit de la acest senzor.
   uint32_t packets;
+
+  // Cate pachete ale acestui senzor NU au ajuns niciodata la hub.
+  // Se deduc din GOLURILE din frame counter: senzorul il incrementeaza
+  // la fiecare transmisie, inclusiv la cele esuate, deci un salt de la
+  // 41 la 44 inseamna doua pachete pierdute pe drum. Este singurul
+  // indicator direct de coliziune sau de acoperire proasta pe care il
+  // are hub-ul - un pachet pierdut nu lasa nicio alta urma.
+  uint32_t lostPackets;
 
   // Marcat de comanda `remove`. Inregistrarea NU se sterge la trimiterea
   // primului RESET: se pastreaza, cu cheia intacta, cat timp senzorul
@@ -85,6 +119,20 @@ struct DeviceRecord {
   // millis() la ultimul pachet valid. NU se pastreaza peste repornire -
   // este relativ la pornirea hub-ului si se pune pe 0 la incarcare.
   uint32_t lastSeenMs;
+
+  // --- Ultima masuratoare, pentru tabelul comenzii `sensors` ---------
+  // Toate trei sunt relative la sesiunea curenta si se zeroizeaza la
+  // incarcarea din NVS, ca lastSeenMs: o temperatura de acum trei
+  // saptamani afisata ca "ultima citire" ar induce in eroare.
+  int16_t  lastTempX100;
+  int16_t  lastRssi;
+  bool     hasReading;
+
+  // true cat timp senzorul este considerat "nu se mai aude"
+  // (SENSOR_OFFLINE_MS fara niciun pachet valid). Serveste doar ca sa se
+  // anunte O SINGURA DATA caderea si o singura data revenirea, in loc de
+  // o linie pe Serial la fiecare trecere prin tick().
+  bool     offlineReported;
 };
 
 namespace DeviceRegistry {
@@ -106,9 +154,22 @@ namespace DeviceRegistry {
   // nullptr daca senzorul nu are voie sa se inroleze deloc.
   const uint8_t* findAppKey(const uint8_t* devEui);
 
-  // Prima adresa libera din DEV_ADDR_MIN..DEV_ADDR_MAX, sau 0 daca nu
-  // mai este niciuna (registrul plin).
-  uint8_t allocateAddress();
+  // Cate randuri are lista de provisioning din Config.h.
+  uint8_t provisionedCount();
+
+  // DevEUI-ul randului "index" din lista de provisioning, sau nullptr.
+  const uint8_t* provisionedEui(uint8_t index);
+
+  // NUMARUL senzorului = adresa lui = pozitia in lista de provisioning
+  // plus unu. Intoarce 0 daca DevEUI nu este in lista, sau daca pozitia
+  // lui depaseste HUB_MAX_SENSORS.
+  //
+  // Aceasta functie a inlocuit vechiul allocateAddress(), care dadea
+  // prima adresa libera. Diferenta se vede abia cu mai multi senzori:
+  // acolo "prima libera" facea ca numarul unei placi sa depinda de
+  // ordinea in care au fost pornite si sa se schimbe dupa fiecare
+  // dezinrolare, deci sa nu poata fi scris pe cutie.
+  uint8_t addressForEui(const uint8_t* devEui);
 
   // Adauga sau inlocuieste inregistrarea unui senzor. Intoarce pointerul
   // catre inregistrarea din registru, sau nullptr daca nu mai este loc.
@@ -130,8 +191,15 @@ namespace DeviceRegistry {
   // Sterge complet registrul (si din NVS).
   void clear();
 
-  // Afiseaza registrul pe Serial, in forma ceruta de comanda `list`.
+  // Afiseaza registrul pe Serial, in forma ceruta de comanda `list`:
+  // o linie pe senzor, cu identitatea si starea dezinrolarii.
   void printAll();
+
+  // Tabelul comenzii `sensors`: toate cele HUB_MAX_SENSORS locuri, si
+  // cele ocupate, si cele libere, cu ultima masuratoare si cu starea
+  // legaturii. Este vederea de zi cu zi asupra retelei; `list` ramane
+  // vederea asupra registrului.
+  void printSensorTable();
 
   // Afiseaza lista de provisioning din Config.h - cine ARE VOIE sa se
   // inroleze, indiferent daca s-a inrolat deja sau nu.

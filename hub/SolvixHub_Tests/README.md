@@ -55,19 +55,90 @@ Se scriu ca text, nu ca cifre, si merg si in timpul unui test:
 | Comanda | Ce face |
 |---------|---------|
 | `pair` | Deschide fereastra de inrolare (porneste testul 8 daca nu ruleaza). LED 2 clipeste cat timp fereastra e deschisa. |
+| `sensors` | **Tabelul retelei:** toate cele `HUB_MAX_SENSORS` locuri, in ordinea numerelor, cu ultima temperatura, de cat timp nu s-a mai auzit fiecare, RSSI, pachete primite si pachete pierdute. Locurile libere sunt aratate ca atare |
 | `list` | Senzorii inrolati, din registrul salvat in NVS |
-| `provisioned` | Senzorii care **au voie** sa se inroleze (lista din `Config.h`) |
+| `provisioned` | Senzorii care **au voie** sa se inroleze (lista din `Config.h`), cu numarul fiecaruia |
 | `remove <DevEUI>` | Il scoate din retea. Primeste `CMD_DOWN(RESET)` la **fiecare** pachet al lui, iar inregistrarea dispare abia dupa ce senzorul **tace** `REMOVE_CONFIRM_SILENCE_MS` — tacerea e dovada ca a primit comanda (F-031). Refuzat daca senzorul nu a trimis niciodata nimic. |
-| `remove <DevEUI> force` | Il sterge imediat din registru, fara sa il anunte. Senzorul pastreaza cheia si continua sa emita; recuperarea se face de la butonul 2 al senzorului |
-| `stats` | Contoarele testului de pairing |
+| `remove #3` | Acelasi lucru, dar dupa **numarul** senzorului |
+| `remove <...> force` | Il sterge imediat din registru, fara sa il anunte. Senzorul pastreaza cheia si continua sa emita; recuperarea se face de la butonul 2 al senzorului |
+| `stats` | Contoarele testului de pairing, apoi tabelul `sensors` |
 | `help` | Lista aceasta |
 
 `DevEUI` se scrie ca 16 cifre hexazecimale, de exemplu
 `534F4C5649580001`. Separatorii `-`, `:`, `.` si spatiul sunt ignorati.
+Numarul senzorului se scrie ca `#3` sau ca `3`.
 
 **Butonul 1 (GPIO34)** deschide si el fereastra de pairing, ca sa nu fie
 nevoie de un calculator langa hub. Este ascultat doar cand nu ruleaza
 niciun test sau cand ruleaza chiar testul 8.
+
+## Reteaua: pana la 5 senzori, fiecare cu numarul lui
+
+Hub-ul tine `HUB_MAX_SENSORS` senzori — implicit **5**. Fiecare are un
+**numar** fix, de la 1 la 5.
+
+Numarul nu este o eticheta pusa pe deasupra: este chiar **`DevAddr`**,
+octetul `[2]` din fiecare `DATA_ENC` si din fiecare `CMD_DOWN`. Si nu
+vine din ordinea inrolarii, ci din **pozitia senzorului in tabelul
+`PROVISIONED_DEVICES_INIT` din `Config.h`**. Consecinta este tot rostul
+schemei:
+
+- randul 3 din tabel inseamna „Senzor #3" la prima inrolare, dupa o
+  dezinrolare si o reinrolare, si dupa o golire completa a registrului;
+- doua placi nu pot primi niciodata acelasi numar;
+- numarul poate fi scris pe cutie si ramane adevarat.
+
+Aceeasi cifra se scrie si pe placa, ca **`SENSOR_NODE_ID`** in
+`senzor/main.c`. Este singura linie care se schimba intre cele cinci
+firmware-uri: din ea ies acolo `DevEUI`, `AppKey` si slotul de somn.
+Randul N din tabel corespunde placii cu `SENSOR_NODE_ID = N`.
+
+### De la cine vine data
+
+`DevAddr` circula **in clar** — hub-ul trebuie sa il citeasca inainte de
+a sti ce cheie sa foloseasca — dar intra in zona acoperita de MIC, iar
+MIC-ul se calculeaza cu cheia de sesiune a acelui senzor. Un pachet cu
+adresa modificata pe drum, sau un senzor care ar minti in privinta ei,
+nu se verifica cu nicio cheie din registru. Identificarea este deci in
+clar, dar nu este falsificabila.
+
+Nu exista cazul „date amestecate intre senzori": doua pachete care se
+suprapun in aer se pierd **amandoua**, deci ori un pachet ajunge intreg
+si atribuit corect, ori nu ajunge deloc.
+
+### Ca sa nu vorbeasca toti odata
+
+Hub-ul **nu** programeaza sloturi si nu cere nimanui sa astepte; un
+protocol de rezervare a canalului ar fi costat pe PIC16 mai mult decat
+pierde astazi in coliziuni. In schimb, fiecare senzor doarme altfel
+(`senzor/main.c`, sectiunea 1):
+
+| Senzor | Treziri WDT | Interval nominal |
+|--------|-------------|------------------|
+| #1 | 11 + jitter 0..3 | 23,2 – 29,6 s |
+| #2 | 12 + jitter 0..3 | 25,3 – 31,7 s |
+| #3 | 13 + jitter 0..3 | 27,4 – 33,8 s |
+| #4 | 14 + jitter 0..3 | 29,6 – 35,9 s |
+| #5 | 15 + jitter 0..3 | 31,7 – 38,0 s |
+
+Doua efecte, amandoua necesare. **Intervalul propriu** (din `DevAddr`)
+face ca doi senzori care s-au ciocnit o data sa nu ramana ciocniti: se
+despart de la sine dupa o perioada. **Jitter-ul aleator** de la fiecare
+ciclu rupe si cazul in care doua placi ar nimeri acelasi numar de
+treziri, si pornirea simultana dupa o pana de curent.
+
+Un `DATA_ENC` de 17 octeti sta pe aer ~46 ms la SF7/BW125/CR4-5, iar un
+senzor emite o data la ~30 s: ocuparea canalului este de 0,15% per placa.
+Cate o coliziune izolata tot se intampla, si de aceea hub-ul o **numara**
+— vezi coloana `pierd.` din `sensors`.
+
+### Cand un senzor amuteste
+
+Un senzor care nu s-a mai auzit de `SENSOR_OFFLINE_MS` (150 s, adica
+trei-patru masuratori ratate la rand) este anuntat o data pe Serial, si
+tot o data la revenire. Cu o singura placa disparitia ei era evidenta —
+nu mai curgea nimic; cu cinci, jurnalul curge la fel de repede si lipsa
+exact a uneia trece neobservata.
 
 ## Cum decurge o inrolare
 
@@ -129,6 +200,15 @@ apasat trei secunde. Hub-ul aminteste asta la fiecare
 `PAIRING_UNKNOWN_HINT_EVERY` pachete de acest fel.
 
 ## Ce se pastreaza peste repornire
+
+> **La actualizarea la versiunea cu mai multi senzori:**
+> `REGISTRY_BLOB_VERSION` a trecut pe **3**, fiindca `DeviceRecord` a
+> primit campuri noi. Registrul salvat de versiunea precedenta este
+> ignorat, deci hub-ul porneste cu registrul gol, in timp ce senzorii
+> isi pastreaza sesiunile in HEF: ei continua sa emita si apar ca
+> `DevAddr ... nu este inrolat`. Fiecare trebuie **reinrolat o data**,
+> manual. Numarul primit inapoi este acelasi ca inainte, fiindca vine
+> din tabelul de provisioning, nu din ordinea inrolarii.
 
 Registrul (`DevEUI`, `DevAddr`, `SessKey`, ultimul frame counter) traieste
 in **NVS**, prin `Preferences`, in spatiul `solvix-pair`. Se salveaza la
@@ -217,7 +297,16 @@ totul pare "corect" dar nimic nu se valideaza:
 | Pe hub (`Config.h`) | Pe senzor (`main.c`) |
 |---------------------|----------------------|
 | `PAIRING_ENCRYPT_PAYLOAD` | `PAIRING_ENCRYPT_PAYLOAD` |
-| perechea din `PROVISIONED_DEVICES_INIT` | `PROVISION_DEV_EUI` + `PROVISION_APP_KEY` |
+| randul N din `PROVISIONED_DEVICES_INIT` | `SENSOR_NODE_ID = N`, din care ies `PROVISION_DEV_EUI` si `PROVISION_APP_KEY` |
+| `REMOVE_CONFIRM_SILENCE_MS` si `SENSOR_OFFLINE_MS` | `SLEEP_WAKEUPS_BASE`, `SLEEP_SLOT_MASK`, `SLEEP_JITTER_MASK` |
+
+Ultima linie nu este o simetrie de forma, ci o dependenta reala: hub-ul
+confirma dezinrolarea prin **tacere**, iar un senzor care doarme tace si
+el. Daca somnul creste peste fereastra de confirmare, hub-ul sterge
+inregistrarea **si cheia** in timp ce senzorul doar doarme, si nu il mai
+poate opri niciodata (F-031, F-034, F-036). Atentie in special la
+cresterea lui `HUB_MAX_SENSORS`: ultimul senzor primeste automat cel mai
+lung interval de somn.
 
 ### Constantele de pairing din `Config.h`
 
@@ -226,10 +315,13 @@ totul pare "corect" dar nimic nu se valideaza:
 | `PAIRING_MODE_TIMEOUT_MS` | 120000 | Cat sta deschisa fereastra de inrolare |
 | `PAIRING_BLINK_MS` | 250 | Ritmul de clipire al LED 2 in mod pairing |
 | `PAIRING_SEND_ACK` | 1 | Trimite `CMD_DOWN(ACK)` dupa fiecare pachet valid |
-| `REMOVE_CONFIRM_SILENCE_MS` | 20000 | Cat trebuie sa taca un senzor marcat ca dezinrolarea sa fie confirmata. 4 x `TX_INTERVAL_MS`, ca o coliziune izolata sa nu para tacere |
+| `REMOVE_CONFIRM_SILENCE_MS` | 180000 | Cat trebuie sa taca un senzor marcat ca dezinrolarea sa fie confirmata. Patru cicluri de somn in cazul cel mai lent (senzorul #5, cu jitter maxim si LFINTOSC la limita de toleranta) |
 | `PAIRING_REOPEN_AFTER_REMOVE` | 1 | Redeschide fereastra de pairing dupa o dezinrolare confirmata. Doar in urma unei comenzi date de om, deci nimeni nu se inroleaza pe furis |
 | `PAIRING_UNKNOWN_HINT_EVERY` | 10 | La cate pachete de la un `DevAddr` neinrolat se repeta sfatul de recuperare |
-| `REGISTRY_MAX_DEVICES` | 8 | Cati senzori incap in registru |
+| `HUB_MAX_SENSORS` | 5 | Cati senzori are reteaua. Este si limita registrului, si domeniul numerelor (1..5), si domeniul adreselor alocate |
+| `SENSOR_OFFLINE_MS` | 150000 | Dupa cat timp fara niciun pachet este anuntat un senzor ca „nu se mai aude" |
+| `SENSOR_FCNT_GAP_RESTART` | 20 | De la ce salt in frame counter hub-ul spune „senzorul a repornit" in loc sa numere pierderi. La pornire la rece senzorul sare inainte cu 50 (F-022), si acelea nu sunt pachete pierdute |
+| `REGISTRY_MAX_DEVICES` | `HUB_MAX_SENSORS` | Cati senzori incap in registru |
 | `REGISTRY_SAVE_EVERY` | 20 | La cate pachete se rescrie registrul in NVS |
 
 Formatul tuturor pachetelor este descris in

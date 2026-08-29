@@ -38,6 +38,10 @@ namespace TestPairing {
   static unsigned long s_foreign = 0;
   static unsigned long s_removalsConfirmed = 0;
 
+  // Cate pachete au lipsit cu totul, insumat pe toti senzorii. Se deduc
+  // din golurile de frame counter; per senzor, cifra sta in registru.
+  static unsigned long s_lostTotal = 0;
+
   // Cate pachete de la adrese neinrolate au trecut de la ultimul sfat de
   // recuperare afisat.
   static unsigned long s_unknownSeen = 0;
@@ -47,6 +51,27 @@ namespace TestPairing {
 
   bool isRunning()     { return s_ready; }
   bool isPairingMode() { return s_pairingMode; }
+
+  // -------------------------------------------------------------------
+  // Identificarea senzorului in jurnal
+  // -------------------------------------------------------------------
+
+  /*
+   * "Senzor #3 (0x03)" - numarul si adresa sunt acelasi octet, dar sunt
+   * afisate amandoua dinadins: numarul este ce foloseste omul, adresa
+   * este ce se vede pe fir cand cineva se uita cu un analizor.
+   *
+   * Cu un singur senzor, jurnalul putea sa nu spuna de la cine vine
+   * pachetul. Cu cinci, fiecare linie trebuie sa inceapa cu asta.
+   */
+  static void printSensorTag(uint8_t devAddr) {
+    Serial.print(F("Senzor #"));
+    Serial.print(devAddr);
+    Serial.print(F(" (0x"));
+    if (devAddr < 0x10) Serial.print('0');
+    Serial.print(devAddr, HEX);
+    Serial.print(')');
+  }
 
   // -------------------------------------------------------------------
   // Modul pairing
@@ -87,6 +112,54 @@ namespace TestPairing {
       s_lastBlink = millis();
       s_blinkOn = !s_blinkOn;
       Leds::set(PIN_LED_2, s_blinkOn);
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Supravegherea senzorilor tacuti
+  // -------------------------------------------------------------------
+
+  /*
+   * Cu un singur senzor, disparitia lui era evidenta: nu mai curgea
+   * nimic pe Serial. Cu cinci, jurnalul curge la fel de repede si numai
+   * unul lipseste - exact cazul pe care ochiul nu il prinde.
+   *
+   * Se anunta o SINGURA data caderea si o singura data revenirea.
+   * Senzorii marcati pentru dezinrolare sunt sariti: acolo tacerea este
+   * rezultatul dorit, nu o defectiune, si o are pe conditia ei
+   * (servicePendingRemovals).
+   */
+  static void serviceOfflineWatch() {
+    for (uint8_t i = 0; i < DeviceRegistry::count(); i++) {
+      DeviceRecord* device = DeviceRegistry::at(i);
+      if (device == nullptr || device->pendingReset) continue;
+
+      // Fara niciun pachet in sesiunea asta nu avem de la ce sa masuram
+      // tacerea: dupa o repornire a hub-ului toti senzorii sunt "nevazuti"
+      // pana la primul lor pachet, ceea ce nu este acelasi lucru cu a fi
+      // cazut.
+      if (device->lastSeenMs == 0) continue;
+
+      bool silent = (millis() - device->lastSeenMs) >= SENSOR_OFFLINE_MS;
+
+      if (silent && !device->offlineReported) {
+        device->offlineReported = true;
+        Serial.println();
+        Serial.print(F(">> NU SE MAI AUDE: "));
+        printSensorTag(device->devAddr);
+        Serial.print(F(" - niciun pachet de "));
+        Serial.print((millis() - device->lastSeenMs) / 1000UL);
+        Serial.println(F(" s."));
+        Serial.println(F(">> Verifica alimentarea placii, antena si distanta. Sesiunea lui ramane"));
+        Serial.println(F(">> valida in registru, deci daca revine isi continua numerotarea."));
+      }
+      else if (!silent && device->offlineReported) {
+        device->offlineReported = false;
+        Serial.println();
+        Serial.print(F(">> A REVENIT: "));
+        printSensorTag(device->devAddr);
+        Serial.println(F("."));
+      }
     }
   }
 
@@ -141,19 +214,26 @@ namespace TestPairing {
       uint8_t  eui[DEV_EUI_LEN];
       memcpy(eui, device->devEui, DEV_EUI_LEN);
       uint16_t attempts = device->resetAttempts;
+      uint8_t  number   = device->devAddr;
 
       DeviceRegistry::removeByEui(eui);
       s_sinceSave = 0;
       s_removalsConfirmed++;
 
       Serial.println();
-      Serial.print(F(">> DEZINROLARE CONFIRMATA: "));
+      Serial.print(F(">> DEZINROLARE CONFIRMATA: Senzor #"));
+      Serial.print(number);
+      Serial.print(F(", DevEUI "));
       SensorPacketCodec::printEui(eui);
       Serial.print(F(" a tacut "));
       Serial.print(REMOVE_CONFIRM_SILENCE_MS / 1000UL);
       Serial.print(F(" s dupa ultimul RESET (trimise: "));
       Serial.print(attempts);
       Serial.println(F(")."));
+      Serial.print(F(">> Numarul #"));
+      Serial.print(number);
+      Serial.println(F(" ramane rezervat placii: vine din tabelul de provisioning,"));
+      Serial.println(F(">> deci la o reinrolare primeste exact acelasi numar inapoi."));
       Serial.println(F(">> Sters din registru. Cheia lui de sesiune nu mai este valida nicaieri:"));
       Serial.println(F(">> senzorul si-a sters-o din HEF, hub-ul a sters inregistrarea."));
       Serial.println(F(">> Ca sa il aduci inapoi: 'pair' pe hub SI trei secunde pe butonul 2 al"));
@@ -183,7 +263,9 @@ namespace TestPairing {
 
     Serial.print(F("      -> CMD_DOWN "));
     Serial.print(commandType == CMD_TYPE_RESET ? F("RESET") : F("ACK"));
-    Serial.print(F(" trimis (counter "));
+    Serial.print(F(" catre "));
+    printSensorTag(device.devAddr);
+    Serial.print(F(" (counter "));
     Serial.print(device.downCounter);
     Serial.println(F(")"));
   }
@@ -246,13 +328,33 @@ namespace TestPairing {
       return;
     }
 
-    // 4. Adresa: la o re-inrolare se pastreaza cea veche, ca sa nu se
-    //    umple spatiul de adrese cu aceeasi placa.
-    uint8_t devAddr = (existing != nullptr) ? existing->devAddr
-                                            : DeviceRegistry::allocateAddress();
+    // 4. NUMARUL senzorului, care este si adresa lui. Nu se aloca "prima
+    //    libera": este pozitia in tabelul de provisioning din Config.h,
+    //    plus unu. Asa aceeasi placa primeste acelasi numar la fiecare
+    //    inrolare, indiferent de ordinea in care au fost pornite placile
+    //    si indiferent daca registrul a fost golit intre timp - numarul
+    //    poate fi deci scris pe cutie.
+    uint8_t devAddr = DeviceRegistry::addressForEui(request.devEui);
     if (devAddr == 0) {
       s_joinsRejected++;
-      Serial.println(F("      REFUZAT: nu mai sunt adrese libere (registrul este plin)."));
+      Serial.println(F("      REFUZAT: DevEUI-ul este in lista de provisioning, dar pe o pozitie"));
+      Serial.println(F("      peste HUB_MAX_SENSORS. Creste HUB_MAX_SENSORS in Config.h sau muta"));
+      Serial.println(F("      randul mai sus in PROVISIONED_DEVICES_INIT."));
+      return;
+    }
+
+    // Nu poate fi ocupat de altcineva - pozitia din tabel este unica per
+    // DevEUI - dar daca in NVS a ramas o inregistrare dintr-o versiune in
+    // care adresele se alocau in ordinea inrolarii, ea poate sta fix pe
+    // numarul asta. Se spune limpede, in loc sa se suprascrie in tacere
+    // cheia altui senzor.
+    DeviceRecord* squatter = DeviceRegistry::findByAddr(devAddr);
+    if (squatter != nullptr && squatter != existing) {
+      s_joinsRejected++;
+      Serial.print(F("      REFUZAT: numarul #"));
+      Serial.print(devAddr);
+      Serial.println(F(" este ocupat in registru de alt DevEUI (inregistrare veche)."));
+      Serial.println(F("      Sterge-l cu 'remove <DevEUI> force' si repeta inrolarea."));
       return;
     }
 
@@ -286,10 +388,15 @@ namespace TestPairing {
     s_joinsAccepted++;
     Leds::pulse(PIN_LED_1);
 
-    Serial.print(F("      ACCEPTAT. DevAddr alocat: 0x"));
-    if (devAddr < 0x10) Serial.print('0');
-    Serial.print(devAddr, HEX);
-    Serial.println(F("  - JOIN_ACCEPT trimis, cheie de sesiune salvata."));
+    Serial.print(F("      ACCEPTAT ca "));
+    printSensorTag(devAddr);
+    Serial.println(F(" - JOIN_ACCEPT trimis, cheie de sesiune salvata."));
+    Serial.print(F("      Inrolati acum: "));
+    Serial.print(DeviceRegistry::count());
+    Serial.print(F(" din "));
+    Serial.print(HUB_MAX_SENSORS);
+    Serial.println(F(". Din numar iese si slotul lui de somn, deci de acum"));
+    Serial.println(F("      emite pe alt ritm decat ceilalti."));
   }
 
   // -------------------------------------------------------------------
@@ -304,6 +411,11 @@ namespace TestPairing {
       return;
     }
 
+    // Aici se raspunde la intrebarea "de la cine vine data": DevAddr
+    // circula in CLAR in octetul [2], dar este acoperit de MIC, deci nu
+    // poate fi nici falsificat, nici confundat intre senzori. Doua
+    // pachete simultane se pierd amandoua pe radio; oricare AJUNGE, se
+    // stie fara ambiguitate al cui este.
     DeviceRecord* device = DeviceRegistry::findByAddr(data.devAddr);
     if (device == nullptr) {
       s_dataUnknown++;
@@ -330,7 +442,9 @@ namespace TestPairing {
     // rejucat nu merita nici macar o cifrare.
     if (device->hasUplink && data.frameCounter <= device->lastFrameCounterUp) {
       s_dataReplay++;
-      Serial.print(F("[DATA] REPLAY: counter "));
+      Serial.print(F("[DATA] REPLAY de la "));
+      printSensorTag(data.devAddr);
+      Serial.print(F(": counter "));
       Serial.print(data.frameCounter);
       Serial.print(F(" <= ultimul acceptat "));
       Serial.println(device->lastFrameCounterUp);
@@ -341,7 +455,9 @@ namespace TestPairing {
     // cifrat. Orice bit schimbat pe drum cade aici.
     if (!HubCrypto::macVerify(device->sessKey, buffer, DATA_ENC_MIC_INPUT_LEN, data.mic)) {
       s_dataBadMic++;
-      Serial.println(F("[DATA] RESPINS: MIC gresit (cheie de sesiune diferita sau pachet modificat)."));
+      Serial.print(F("[DATA] RESPINS de la "));
+      printSensorTag(data.devAddr);
+      Serial.println(F(": MIC gresit (cheie de sesiune diferita sau pachet modificat)."));
       return;
     }
 
@@ -357,9 +473,8 @@ namespace TestPairing {
       device->hasUplink = true;
       device->lastSeenMs = millis();
 
-      Serial.print(F("[DATA] DevAddr 0x"));
-      if (data.devAddr < 0x10) Serial.print('0');
-      Serial.print(data.devAddr, HEX);
+      Serial.print(F("[DATA] "));
+      printSensorTag(data.devAddr);
       Serial.print(F(" - dezinrolare in curs, inca se aude. Retrimit RESET (incercarea "));
       Serial.print((unsigned int)(device->resetAttempts + 1));
       Serial.println(F(")."));
@@ -385,26 +500,67 @@ namespace TestPairing {
       // dar continutul nu se valideaza: cel mai probabil comutatorul
       // PAIRING_ENCRYPT_PAYLOAD difera intre hub si senzor.
       s_dataBadMic++;
-      Serial.println(F("[DATA] MIC bun, dar payload-ul decriptat nu trece de checksum."));
+      Serial.print(F("[DATA] "));
+      printSensorTag(data.devAddr);
+      Serial.println(F(": MIC bun, dar payload-ul decriptat nu trece de checksum."));
       Serial.println(F("       Verifica PAIRING_ENCRYPT_PAYLOAD: trebuie identic pe hub si pe senzor."));
       SensorPacketCodec::printRaw(plain, SENSOR_PACKET_LEN);
       Serial.println();
       return;
     }
 
+    /*
+     * Pachetele care NU au ajuns, deduse din golul de frame counter.
+     * Senzorul isi incrementeaza contorul la fiecare transmisie, chiar
+     * si la una esuata (senzor/main.c, sectiunea 16), deci un salt de la
+     * 41 la 44 inseamna exact doua pachete pierdute pe drum. Cu mai
+     * multi senzori, cauza obisnuita este o coliziune; cu unul singur,
+     * acoperirea. Este singura urma pe care o lasa o coliziune: pachetele
+     * suprapuse nu ajung la hub in nicio forma.
+     *
+     * Doua goluri NU sunt pierderi si ar falsifica tocmai cifra dupa care
+     * se judeca coliziunile:
+     *   - primul pachet de dupa o inrolare (hasUplink inca fals) - nu
+     *     avem de la ce sa scadem;
+     *   - saltul cu FCNT_CHECKPOINT_EVERY pe care senzorul il face la
+     *     fiecare pornire la rece. Peste SENSOR_FCNT_GAP_RESTART se
+     *     considera repornire si se spune asta, in loc sa se adune
+     *     cincizeci de pierderi imaginare.
+     */
+    if (device->hasUplink) {
+      uint32_t gap = data.frameCounter - device->lastFrameCounterUp - 1;
+
+      if (gap >= SENSOR_FCNT_GAP_RESTART) {
+        Serial.print(F("       ("));
+        printSensorTag(data.devAddr);
+        Serial.print(F(" a sarit "));
+        Serial.print(gap);
+        Serial.println(F(" valori de counter: a repornit. Nu se numara ca pierderi.)"));
+      }
+      else if (gap > 0) {
+        device->lostPackets += gap;
+        s_lostTotal += gap;
+      }
+    }
+
     device->lastFrameCounterUp = data.frameCounter;
     device->hasUplink = true;
     device->packets++;
     device->lastSeenMs = millis();
+    device->lastTempX100 = packet.tempX100;
+    device->lastRssi = (int16_t)rssi;
+    device->hasReading = true;
+
+    // Daca tocmai a revenit dupa o tacere lunga, serviceOfflineWatch()
+    // anunta revenirea la urmatorul tick.
 
     s_dataValid++;
     Leds::pulse(PIN_LED_1);
 
     Serial.print(F("[#"));
     Serial.print(s_dataValid);
-    Serial.print(F("] DevAddr 0x"));
-    if (data.devAddr < 0x10) Serial.print('0');
-    Serial.print(data.devAddr, HEX);
+    Serial.print(F("] "));
+    printSensorTag(data.devAddr);
     Serial.print(F("  counter "));
     Serial.print(data.frameCounter);
     Serial.print(F("  "));
@@ -413,7 +569,13 @@ namespace TestPairing {
     Serial.print(rssi);
     Serial.print(F(" dBm  SNR: "));
     Serial.print(snr, 1);
-    Serial.println(F(" dB"));
+    Serial.print(F(" dB"));
+    if (device->lostPackets != 0) {
+      Serial.print(F("  (pierdute pana acum: "));
+      Serial.print(device->lostPackets);
+      Serial.print(')');
+    }
+    Serial.println();
 
     // Dezinrolarea a fost tratata mai sus, inainte de decodare: aici
     // ajung doar pachetele unui device sanatos.
@@ -438,7 +600,11 @@ namespace TestPairing {
   bool begin() {
     printTitle("PAIRING CRIPTAT - INROLARE SI DATE");
     Serial.println(F("Ascult JOIN_REQ (0x10) si DATA_ENC (0x12) de la nodurile senzor."));
-    Serial.println(F("Comenzi in timpul testului: pair | list | remove <DevEUI> | stats"));
+    Serial.print(F("Reteaua are loc pentru "));
+    Serial.print(HUB_MAX_SENSORS);
+    Serial.println(F(" senzori; fiecare are un numar fix, dat de pozitia lui"));
+    Serial.println(F("in tabelul de provisioning din Config.h."));
+    Serial.println(F("Comenzi in timpul testului: pair | sensors | list | remove <DevEUI> | stats"));
     printSeparator();
 
     s_ready = LoRaRadio::begin();
@@ -448,7 +614,7 @@ namespace TestPairing {
 
     if (s_ready) {
       Serial.println(F("LoRa OK: 868.0 MHz, SF7, BW 125 kHz, CR 4/5, sync 0x12, CRC on."));
-      DeviceRegistry::printAll();
+      DeviceRegistry::printSensorTable();
       Leds::set(PIN_LED_2, true);      // LED de stare: radioul asculta
     }
 
@@ -461,6 +627,7 @@ namespace TestPairing {
     Leds::service();                   // stinge pulsul precedent la scadenta
     servicePairingWindow();
     servicePendingRemovals();          // confirma dezinrolarile prin tacere
+    serviceOfflineWatch();             // anunta senzorii care au amutit
 
     uint8_t buffer[RX_BUFFER_SIZE];
     int   length = 0;
@@ -498,7 +665,11 @@ namespace TestPairing {
     }
     else if (millis() - s_lastActivity >= HEARTBEAT_MS) {
       s_lastActivity = millis();
-      Serial.print(F("...niciun pachet in ultimele 15 s.  (date valide: "));
+      Serial.print(F("...niciun pachet in ultimele 15 s.  (senzori inrolati: "));
+      Serial.print(DeviceRegistry::count());
+      Serial.print('/');
+      Serial.print(HUB_MAX_SENSORS);
+      Serial.print(F(", date valide: "));
       Serial.print(s_dataValid);
       Serial.print(F(", inrolari: "));
       Serial.print(s_joinsAccepted);
@@ -531,7 +702,13 @@ namespace TestPairing {
     Serial.print(F("  MIC gresit         : ")); Serial.println(s_dataBadMic);
     Serial.print(F("  adresa necunoscuta : ")); Serial.println(s_dataUnknown);
     Serial.print(F("  pachete straine    : ")); Serial.println(s_foreign);
+    Serial.print(F("  pachete pierdute   : ")); Serial.print(s_lostTotal);
+    Serial.println(F("   (goluri in frame counter, pe toti senzorii)"));
     Serial.print(F("  dezinrolari confirmate: ")); Serial.println(s_removalsConfirmed);
+    Serial.print(F("  senzori inrolati   : "));
+    Serial.print(DeviceRegistry::count());
+    Serial.print('/');
+    Serial.println(HUB_MAX_SENSORS);
     Serial.print(F("  mod pairing        : "));
     Serial.println(s_pairingMode ? F("ACTIV") : F("inchis"));
   }

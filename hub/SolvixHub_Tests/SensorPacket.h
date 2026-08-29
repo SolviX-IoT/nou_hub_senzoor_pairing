@@ -63,6 +63,23 @@
             IV (8B) = DevAddr(1) | FrameCounter(4) | 0x00 (uplink) | zero(2)
     [13..16] MIC = MAC(SessKey, bytes[0..12])
 
+  DevAddr DIN OCTETUL [2] ESTE NUMARUL SENZORULUI, si el este singurul
+  raspuns de care are nevoie intrebarea "de la cine vine data" cand pe
+  canal sunt mai multe placi. Circula in clar - hub-ul trebuie sa il
+  citeasca INAINTE de a sti ce cheie sa foloseasca - dar intra in zona
+  acoperita de MIC, iar MIC-ul se calculeaza cu cheia de sesiune a acelui
+  senzor. O adresa modificata pe drum, sau un senzor care ar minti in
+  privinta ei, dau un MIC care nu se verifica cu nicio cheie din registru.
+  Deci: identificarea este in clar, dar nu este falsificabila.
+
+  DevAddr intra si in IV-ul CTR, deci doi senzori cu acelasi frame
+  counter nu produc niciodata acelasi flux de chei.
+
+  Un pachet suprapus peste altul in aer se pierde de tot - nu ajunge la
+  hub in nicio forma - deci nu exista cazul "date amestecate intre
+  senzori": ori un pachet ajunge intreg si atribuit corect, ori nu ajunge
+  deloc si se vede ca un gol in frame counter.
+
   ---------------------------------------------------------------------
   0x13 - CMD_DOWN (hub -> senzor), 12 octeti
   ---------------------------------------------------------------------
@@ -129,8 +146,14 @@
 // deconectat, sau temperatura in afara domeniului -20...+100 C.
 #define SENSOR_TEMP_INVALID     ((int16_t)-30000)
 
-// Adresele pe care hub-ul le poate aloca. 0x00 si 0xFF sunt rezervate
+// Domeniul de adrese permis de PROTOCOL. 0x00 si 0xFF sunt rezervate
 // (0xFF este si valoarea unei celule de flash nescrise pe senzor).
+//
+// Ce ALOCA hub-ul este mult mai ingust si nu se decide aici: DevAddr
+// este numarul senzorului, 1..HUB_MAX_SENSORS, dat de pozitia lui in
+// tabelul de provisioning din Config.h (DeviceRegistry::addressForEui).
+// Limitele de mai jos raman ca verificare de sanitate a pachetelor si ca
+// domeniu de valori valide daca reteaua creste vreodata.
 #define DEV_ADDR_MIN            0x01
 #define DEV_ADDR_MAX            0xFE
 

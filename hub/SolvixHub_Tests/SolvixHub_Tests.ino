@@ -14,15 +14,33 @@
     3. Scrie cifra testului si apasa Enter. Tasta 'm' reafiseaza meniul,
        tasta '0' opreste testul curent.
 
+  RETEAUA: PANA LA HUB_MAX_SENSORS SENZORI, FIECARE CU NUMARUL LUI
+    Hub-ul tine pana la 5 senzori (HUB_MAX_SENSORS in Config.h). Fiecare
+    are un NUMAR fix, 1..5, care este in acelasi timp si DevAddr-ul lui
+    din protocol si pozitia lui in tabelul de provisioning. Numarul NU
+    depinde de ordinea in care au fost inrolate placile si nu se schimba
+    dupa o dezinrolare, deci poate fi scris pe cutie. Aceeasi cifra este
+    si SENSOR_NODE_ID in senzor/main.c.
+
+    Pachetele diferitilor senzori NU se amesteca: DevAddr calatoreste in
+    clar in fiecare DATA_ENC si este acoperit de MIC-ul calculat cu cheia
+    de sesiune a acelui senzor, deci un pachet ajuns la hub este
+    intotdeauna atribuit corect. Ca sa nu se ciocneasca in aer, fiecare
+    senzor doarme un interval propriu (23..38 s, dupa numar) plus un
+    jitter aleator la fiecare ciclu - vezi senzor/main.c, sectiunea 1.
+
   COMENZI DE PAIRING (cuvinte, nu cifre; merg si in timpul unui test)
     pair              - deschide fereastra de inrolare (porneste testul 8
                         daca nu ruleaza deja)
+    sensors           - tabelul celor 5 locuri: cine e inrolat, ultima
+                        temperatura, de cat timp nu s-a mai auzit fiecare
     list              - senzorii inrolati, din registrul salvat in NVS
     provisioned       - senzorii care AU VOIE sa se inroleze (Config.h)
     remove <DevEUI>   - scoate un senzor din retea; la primul lui contact
                         primeste un CMD_DOWN de tip RESET si abia apoi
                         este sters din registru
-    remove <DevEUI> force - il sterge imediat, fara sa il mai anunte
+    remove #<numar>   - acelasi lucru, dar dupa numarul senzorului
+    remove <...> force - il sterge imediat, fara sa il mai anunte
     stats             - contoarele testului de pairing
     help              - lista aceasta
 
@@ -60,7 +78,8 @@
     Leds.h/.cpp         - cele doua LED-uri, D22 si D21
     SensorPacket.*      - formatul TUTUROR pachetelor schimbate cu senzorul
     HubCrypto.*         - XTEA-128, CBC-MAC si CTR (fara biblioteci)
-    DeviceRegistry.*    - registrul senzorilor inrolati, salvat in NVS
+    DeviceRegistry.*    - registrul senzorilor inrolati, salvat in NVS,
+                          si numerotarea lor stabila 1..HUB_MAX_SENSORS
     TestButtons.*       - butoanele de pe GPIO34 / GPIO35
     TestEncSpi.*        - diagnostic SPI de nivel jos pentru ENC28J60
     TestEthernet.*      - DHCP, DNS si cerere HTTP catre internet
@@ -151,8 +170,8 @@ static void printMenu() {
   Serial.println(F("  0) Opreste testul curent"));
   Serial.println(F("  m) Reafiseaza acest meniu"));
   Serial.println(F("--------------------------------------------------"));
-  Serial.println(F("  Comenzi de pairing: pair | list | provisioned |"));
-  Serial.println(F("                      remove <DevEUI> [force] | stats | help"));
+  Serial.println(F("  Comenzi de pairing: pair | sensors | list | provisioned |"));
+  Serial.println(F("                      remove <DevEUI|#numar> [force] | stats | help"));
   Serial.println(F("=================================================="));
   Serial.println(F("Scrie o cifra sau o comanda si apasa Enter (Serial Monitor pe \"Newline\")."));
   Serial.println();
@@ -162,12 +181,16 @@ static void printCommandHelp() {
   Serial.println();
   Serial.println(F("Comenzi de pairing:"));
   Serial.println(F("  pair                    deschide fereastra de inrolare (porneste testul 8)"));
+  Serial.println(F("  sensors                 tabelul celor 5 locuri: temperatura, varsta, RSSI, pierderi"));
   Serial.println(F("  list                    senzorii inrolati (registrul din NVS)"));
   Serial.println(F("  provisioned             senzorii care au voie sa se inroleze (Config.h)"));
   Serial.println(F("  remove <DevEUI>         il scoate din retea; ii trimite RESET la primul contact"));
-  Serial.println(F("  remove <DevEUI> force   il sterge imediat din registru, fara sa il anunte"));
+  Serial.println(F("  remove #3               acelasi lucru, dupa numarul senzorului"));
+  Serial.println(F("  remove <...> force      il sterge imediat din registru, fara sa il anunte"));
   Serial.println(F("  stats                   contoarele testului de pairing"));
   Serial.println(F("DevEUI se scrie ca 16 cifre hexazecimale, ex: 534F4C5649580001"));
+  Serial.println(F("Numarul senzorului se scrie ca '#3' sau ca '3' - este acelasi lucru cu DevAddr,"));
+  Serial.println(F("si este pozitia placii in tabelul de provisioning din Config.h."));
   Serial.println();
 }
 
@@ -227,6 +250,33 @@ static bool parseEui(const String& text, uint8_t* eui) {
   return true;
 }
 
+/*
+ * Un argument scris ca "#3" sau ca "3" inseamna numarul senzorului.
+ * Intoarce numarul, sau 0 daca argumentul nu are forma asta.
+ *
+ * Cu cinci placi in teren, DevEUI de 16 cifre este cel mai bun mod de a
+ * gresi tocmai placa pe care nu voiai sa o scoti din retea. Numarul este
+ * scurt, este scris pe cutie si apare in fiecare linie de jurnal.
+ * DevEUI ramane acceptat: este identitatea adevarata si singura forma
+ * care merge pentru un senzor provizionat dar neinrolat.
+ */
+static uint8_t parseSensorNumber(const String& text) {
+  if (text.length() == 0) return 0;
+
+  unsigned int start = (text.charAt(0) == '#') ? 1 : 0;
+  if (text.length() - start == 0) return 0;
+
+  uint16_t value = 0;
+  for (unsigned int i = start; i < text.length(); i++) {
+    char c = text.charAt(i);
+    if (c < '0' || c > '9') return 0;
+    value = (uint16_t)(value * 10 + (c - '0'));
+    if (value > HUB_MAX_SENSORS) return 0;
+  }
+
+  return (uint8_t)value;
+}
+
 static void commandPair() {
   if (s_activeTest != PAIRING_TEST_INDEX || !s_activeOk) {
     Serial.println(F("Pornesc testul de pairing..."));
@@ -250,9 +300,25 @@ static void commandRemove(const String& argument) {
     force = tail.equalsIgnoreCase("force");
   }
 
+  // Intai forma scurta: "#3" sau "3".
   uint8_t eui[DEV_EUI_LEN];
-  if (!parseEui(euiText, eui)) {
-    Serial.println(F("DevEUI invalid. Se asteapta 16 cifre hexazecimale, ex: 534F4C5649580001"));
+  uint8_t number = parseSensorNumber(euiText);
+
+  if (number != 0) {
+    DeviceRecord* byNumber = DeviceRegistry::findByAddr(number);
+    if (byNumber == nullptr) {
+      Serial.print(F("Senzorul #"));
+      Serial.print(number);
+      Serial.println(F(" nu este inrolat. Vezi 'sensors' pentru locurile ocupate."));
+      return;
+    }
+    memcpy(eui, byNumber->devEui, DEV_EUI_LEN);
+  }
+  else if (!parseEui(euiText, eui)) {
+    Serial.println(F("Argument invalid. Se asteapta fie 16 cifre hexazecimale (DevEUI),"));
+    Serial.print(F("fie numarul senzorului, 1.."));
+    Serial.print(HUB_MAX_SENSORS);
+    Serial.println(F(", scris ca '#3' sau '3'."));
     return;
   }
 
@@ -265,8 +331,11 @@ static void commandRemove(const String& argument) {
   }
 
   if (force) {
+    uint8_t removedNumber = device->devAddr;
     DeviceRegistry::removeByEui(eui);
-    Serial.print(F("Sters imediat din registru: "));
+    Serial.print(F("Sters imediat din registru: Senzor #"));
+    Serial.print(removedNumber);
+    Serial.print(F(", DevEUI "));
     SensorPacketCodec::printEui(eui);
     Serial.println();
     Serial.println(F("ATENTIE: senzorul NU a fost anuntat, deci pastreaza cheia de sesiune si va"));
@@ -305,7 +374,9 @@ static void commandRemove(const String& argument) {
   device->resetSentMs   = 0;
   DeviceRegistry::save();
 
-  Serial.print(F("Marcat pentru dezinrolare: "));
+  Serial.print(F("Marcat pentru dezinrolare: Senzor #"));
+  Serial.print(device->devAddr);
+  Serial.print(F(", DevEUI "));
   SensorPacketCodec::printEui(eui);
   Serial.println();
   Serial.println(F("La FIECARE pachet al lui primeste cate un CMD_DOWN(RESET); se insista cat"));
@@ -332,10 +403,11 @@ static bool handleWordCommand(const String& line) {
   command.toLowerCase();
 
   if (command == "pair")        { commandPair();                     return true; }
+  if (command == "sensors")     { DeviceRegistry::printSensorTable();return true; }
   if (command == "list")        { DeviceRegistry::printAll();        return true; }
   if (command == "provisioned") { DeviceRegistry::printProvisioned();return true; }
   if (command == "stats")       { TestPairing::printStats();
-                                  DeviceRegistry::printAll();        return true; }
+                                  DeviceRegistry::printSensorTable();return true; }
   if (command == "help")        { printCommandHelp();                return true; }
   if (command == "remove")      { commandRemove(argument);           return true; }
 
@@ -434,7 +506,9 @@ void setup() {
   if (DeviceRegistry::begin()) {
     Serial.print(F("Registru incarcat: "));
     Serial.print(DeviceRegistry::count());
-    Serial.println(F(" senzor(i) inrolati."));
+    Serial.print(F(" senzor(i) inrolati din "));
+    Serial.print(HUB_MAX_SENSORS);
+    Serial.println(F(" locuri. Scrie 'sensors' pentru tabel."));
   }
 
   printMenu();

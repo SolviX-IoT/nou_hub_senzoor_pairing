@@ -1,44 +1,66 @@
 /*
  * =====================================================================
- *  SolviX - NOD SENZOR  (varianta cu PAIRING CRIPTAT)
+ *  SolviX - NOD SENZOR  (varianta FARA CRIPTARE)
  *  PIC16LF1508 @ 16 MHz (INTOSC), MPLAB X + XC8
  * =====================================================================
  *
+ *  !!! RETEAUA NU ESTE AUTENTIFICATA !!!
+ *  ---------------------------------------------------------------------
+ *  Criptografia (XTEA-128 + CBC-MAC + CTR) a fost SCOASA din proiect,
+ *  fiindca nu mai incapea in PIC16LF1508: ocupa ~1300 de cuvinte din cele
+ *  3968 utilizabile, iar firmware-ul ajunsese la 97,7% ocupare. Este o
+ *  masura TEMPORARA, pana la un microcontroller cu mai multa memorie.
+ *
+ *  Consecinte, care trebuie stiute inainte de a pune sistemul in
+ *  exploatare - nu sunt teoretice, sunt la indemana oricui are un radio
+ *  LoRa pe 868 MHz cu aceiasi parametri:
+ *    - oricine poate injecta o temperatura falsa pentru orice senzor;
+ *    - oricine poate dezinrola orice placa cu patru octeti
+ *      (A5 13 <DevAddr> 02), iar placa iese din repaus doar cu trei
+ *      secunde de buton, fizic, pe teren;
+ *    - oricine poate inrola o placa falsa cat timp fereastra de pairing
+ *      este deschisa (DevEUI este ghicibil: "SOLVIX" | 0x00 | numar);
+ *    - orice pachet capturat poate fi rejucat; singura limitare ramasa
+ *      pe calea de date este frame counter-ul strict crescator.
+ *  Inrolarea de mai jos este o COMISIONARE (cine e in retea, ce numar
+ *  are, de unde incep contoarele), NU un control de acces.
+ *
+ *  Ultima stare CU criptografie este commit-ul a710142 ("codul 3
+ *  senzori"). De acolo se recupereaza cifrul cand se face upgrade-ul.
+ *  ---------------------------------------------------------------------
+ *
  *  CE FACE:
- *    - la prima pornire (sau dupa un RESET primit de la hub) se
- *      INROLEAZA: trimite JOIN_REQ semnat cu AppKey si asteapta
- *      JOIN_ACCEPT, din care afla DevAddr si JoinNonce;
- *    - din DevNonce + JoinNonce + DevAddr deriva SessKey si o scrie,
- *      impreuna cu DevAddr, in memoria ne-volatila (HEF);
+ *    - la prima pornire sta in REPAUS si tace. Fereastra de inrolare se
+ *      deschide tinand butonul 2 (RC5) apasat ~3 secunde (F-030);
+ *    - INROLAREA: trimite JOIN_REQ cu DevEUI si asteapta JOIN_ACCEPT, din
+ *      care afla DevAddr. Il scrie in memoria ne-volatila (HEF), ca sa
+ *      stie peste un reset ca este inrolat;
  *    - dupa inrolare citeste termistorul NTC 10K / B=3950 de pe RC2
- *      (canal AN6) si trimite temperatura CRIPTATA (DATA_ENC) la
- *      intervalul de somn (vezi SLEEP_WAKEUPS), sau imediat la apasarea
+ *      (canal AN6) si trimite temperatura IN CLAR (DATA_UP) la intervalul
+ *      de somn (vezi SLEEP_WAKEUPS_BASE), sau imediat la apasarea
  *      butonului de pe RC4;
  *    - dupa fiecare transmisie deschide o fereastra scurta de receptie
  *      pentru un eventual CMD_DOWN (ACK sau RESET).
  *
  *  LED-uri:
- *    - LED 1 (RC3) = transmisie de date (un puls la fiecare DATA_ENC);
+ *    - LED 1 (RC3) = transmisie de date (aprins cat tine si fereastra de
+ *      downlink - F-032);
  *    - LED 2 (RC6) = mod pairing / eroare de join.
  *
  *  CE S-A PASTRAT NEATINS din firmware-ul de temperatura:
  *    driverul LoRa de emisie, ADC-ul, tabelul NTC, debounce-ul de buton
  *    si pachetul de temperatura de 6 octeti. Pachetul de 6 octeti NU a
- *    fost modificat: el este exact ce se cripteaza in DATA_ENC, iar
- *    hub-ul il da, dupa decriptare, aceluiasi SensorPacketCodec::decode()
- *    care exista deja.
- *
- *  CE ESTE NOU:
- *    - receptie LoRa (LoRa_Receive), necesara pentru JOIN_ACCEPT si
- *      CMD_DOWN. Firmware-ul anterior era doar TX;
- *    - XTEA-128, cu CBC-MAC pentru MIC si CTR pentru criptare
- *      (NU AES: nu incape in acest device - vezi sectiunea 6 si F-024);
- *    - memorie ne-volatila pe HEF (High-Endurance Flash);
- *    - masina de stari JOINING / OPERATING.
+ *    fost modificat: el este exact ce se transporta in DATA_UP, iar hub-ul
+ *    il da neschimbat aceluiasi SensorPacketCodec::decode() care exista
+ *    deja. Asa raman testul 7 (TEMP_PLAIN) si testul 8 pe acelasi cod.
  *
  *  FORMATUL PACHETELOR este oglindit pe hub in
  *  hub/SolvixHub_Tests/SensorPacket.h.
- *  Orice modificare aici trebuie facuta si acolo, in acelasi commit.
+ *  Orice modificare aici trebuie facuta si acolo, in ACELASI commit:
+ *  fara MIC, o nepotrivire de format nu mai da "MIC gresit", ci o
+ *  temperatura plauzibila si gresita, in tacere. Cele cinci lungimi de
+ *  pachet (6/10/3/13/4) sunt DISTINCTE tocmai ca verificarea de lungime
+ *  sa prinda orice desincronizare; nu le egaliza.
  *
  * ---------------------------------------------------------------------
  *  PRESUPUNERI (nu sunt deduse din codul existent - verifica pe placa!)
@@ -64,24 +86,25 @@
  *     NU mai este o presupunere - este citit din fisierul de device
  *     support al lui XC8 (FLASH_ERASE=20, FLASH_WRITE=20, hexazecimal).
  *     Vezi sectiunea 5 si F-026.
- *  9) DevEUI si AppKey se provizioneaza per unitate din blocul
- *     PROVISION_* de mai jos: la prima pornire, daca regiunea de
- *     provisioning din HEF e goala, valorile de compilare sunt scrise
- *     acolo. FIECARE placa trebuie compilata cu alt DevEUI si alta
- *     AppKey, iar aceeasi pereche trebuie trecuta in tabelul din
- *     hub/SolvixHub_Tests/Config.h.
- * 10) PIC16LF1508 nu are generator de numere aleatoare. DevNonce se
- *     obtine din bitii cei mai putin semnificativi ai unor citiri ADC
- *     succesive de pe NTC, amestecati cu frame counter-ul salvat in HEF.
- *     Este suficient ca doua incercari de join sa nu foloseasca acelasi
- *     nonce, dar NU este o sursa criptografica de entropie.
+ *  9) DevEUI se provizioneaza per unitate din SENSOR_NODE_ID de mai jos:
+ *     la prima pornire, daca regiunea de provisioning din HEF e goala,
+ *     valoarea de compilare este scrisa acolo. FIECARE placa se compileaza
+ *     cu alt SENSOR_NODE_ID, iar acelasi DevEUI trebuie sa apara, pe
+ *     aceeasi pozitie, in PROVISIONED_DEVICES_INIT din
+ *     hub/SolvixHub_Tests/Config.h: pozitia din tabel este numarul
+ *     senzorului (DeviceRegistry::addressForEui, F-037).
  *
  *  CONFIGURATION BITS: sunt cele generate de MCC in
  *  mcc_generated_files/system/src/config_bits.c
- *  (FOSC=INTOSC, WDTE=OFF, MCLRE=ON, BOREN=ON, LVP=ON, PWRTE=OFF).
+ *  (FOSC=INTOSC, WDTE=SWDTEN, MCLRE=ON, BOREN=ON, LVP=ON, PWRTE=OFF).
+ *  WDTE=SWDTEN tine watchdog-ul stins in veghe - transmisia, fereastra de
+ *  receptie si scrierea in HEF sunt lungi si blocante - si il aprinde doar
+ *  in jurul lui SLEEP, unde expirarea TREZESTE procesorul (F-034).
  *  IMPORTANT pentru HEF: WRT=OFF, adica memoria de program NU este
  *  protejata la scriere. Daca cineva pune WRT pe altceva, scrierile in
  *  HEF esueaza in tacere si senzorul reia pairing-ul la fiecare pornire.
+ *  Fisierul e generat de MCC: o regenerare pune WDTE inapoi pe OFF si
+ *  senzorul nu se mai trezeste din somn.
  * =====================================================================
  */
 
@@ -130,7 +153,7 @@
  * Pe canal sunt acum pana la HUB_MAX_SENSORS = 5 placi si un singur hub.
  * Radioul este half-duplex si nu are captura garantata la puteri
  * apropiate: doua pachete care se suprapun in aer se pierd amandoua. Un
- * DATA_ENC de 17 octeti sta pe aer ~46 ms, iar un senzor emite o data la
+ * DATA_UP de 13 octeti sta pe aer ~41 ms, iar un senzor emite o data la
  * ~30 s, deci ocuparea este de 0,15% per placa - o coliziune
  * INTAMPLATOARE este rara si nu deranjeaza pe nimeni, fiindca
  * urmatoarea masuratoare vine oricum peste jumatate de minut.
@@ -206,7 +229,7 @@
 #define JOIN_BACKOFF_STEP_MS    3000U
 #define JOIN_BACKOFF_MAX_MS     30000U
 
-/* Fereastra de receptie deschisa dupa fiecare DATA_ENC, pentru un
+/* Fereastra de receptie deschisa dupa fiecare DATA_UP, pentru un
  * eventual CMD_DOWN (ACK sau RESET). Trebuie sa fie destul de lunga cat
  * hub-ul sa proceseze pachetul si sa raspunda, dar scurta, ca senzorul
  * sa nu piarda timp in RX. */
@@ -218,16 +241,6 @@
  * Pretul: dupa o cadere de tensiune se pierd cel mult N-1 valori de
  * counter, si de aceea la pornire se sare inainte cu N (sectiunea 5). */
 #define FCNT_CHECKPOINT_EVERY   50UL
-
-/* 1 = payload-ul temperaturii este criptat cu XTEA-CTR (schema completa).
- * 0 = SOLUTIE DE REZERVA daca vreodata nu mai incape nici asa: pachetul
- *     de temperatura circula in clar in interiorul DATA_ENC, dar ramane
- *     autentificat cu MIC. Hub-ul are acelasi comutator
- *     (PAIRING_ENCRYPT_PAYLOAD in Config.h) si cele doua trebuie sa fie
- *     IDENTICE, altfel unul "decripteaza" un text deja clar (F-023).
- *     Cu XTEA firmware-ul incape cu payload-ul criptat, deci valoarea
- *     normala este 1. */
-#define PAIRING_ENCRYPT_PAYLOAD 1
 
 /* --- Pairing manual, din butonul 2 (RC5) --------------------------- */
 
@@ -263,18 +276,23 @@
 
 /*
  * NUMARUL SENZORULUI, 1..5. Este singura linie care se modifica intre
- * cele cinci placi: din el ies si DevEUI, si AppKey, prin blocul de mai
- * jos. Inainte se editau doua tabele de octeti la fiecare placa, iar o
- * singura cifra gresita intr-unul din ele dadea acelasi simptom ca o
- * cheie complet gresita: "MIC gresit", fara alt indiciu.
+ * cele cinci placi: din el iese DevEUI, prin blocul de mai jos.
  *
- * Acelasi numar il primeste placa si ca DevAddr de la hub. Hub-ul NU mai
+ * Acelasi numar il primeste placa si ca DevAddr de la hub. Hub-ul NU
  * aloca prima adresa libera, ci POZITIA din tabelul de provisioning din
  * hub/SolvixHub_Tests/Config.h (DeviceRegistry::addressForEui). Senzorul
  * cu SENSOR_NODE_ID = 3 este deci intotdeauna "Senzor #3" in jurnalul
  * hub-ului, indiferent in ce ordine s-au inrolat placile si indiferent
  * de cate ori s-a golit registrul. Din DevAddr iese si slotul de somn de
  * mai sus, deci numarul chiar face doua treburi, nu este o eticheta.
+ *
+ * DE VERIFICAT LA PROGRAMARE: numarul de aici trebuie sa fie acelasi cu
+ * pozitia DevEUI-ului in PROVISIONED_DEVICES_INIT. Cat timp exista MIC,
+ * o nepotrivire dadea un sir de "MIC gresit" pe hub. Acum simptomul este
+ * altul: JOIN_ACCEPT-ul vine cu alta adresa decat cea asteptata, senzorul
+ * il refuza si LED2 da trei clipiri (vezi Join_Attempt). Doua placi
+ * programate cu ACELASI numar nu mai sunt insa deosebite de hub - se vad
+ * ca un singur senzor al carui contor merge inainte si inapoi.
  */
 #define SENSOR_NODE_ID          3
 
@@ -286,46 +304,11 @@
  * DevEUI, 8 octeti: "SOLVIX" in ASCII, apoi 0x00 si numarul placii.
  * PIC16LF1508 nu are un ID unic garantat, deci identitatea se
  * provizioneaza aici si se scrie in HEF la prima pornire.
- *
- * AppKey, 16 octeti: DIFERITA la fiecare placa. Nu circula niciodata
- * prin aer - serveste doar la semnarea JOIN_REQ, la cifrarea
- * JOIN_ACCEPT si la derivarea SessKey. Cheile de mai jos sunt cele de
- * DEZVOLTARE, aceleasi ca in PROVISIONED_DEVICES_INIT din Config.h;
- * inainte de punerea in exploatare se inlocuiesc, tot in pereche.
- *
- * Doar ramura placii curente se compileaza, deci cele patru chei
- * nefolosite nu costa niciun cuvant de program.
  */
 #define PROVISION_DEV_EUI       { 0x53U, 0x4FU, 0x4CU, 0x56U, \
                                   0x49U, 0x58U, 0x00U,        \
                                   (uint8_t)SENSOR_NODE_ID }
 
-#if   SENSOR_NODE_ID == 1
-#define PROVISION_APP_KEY       { 0x00U, 0x11U, 0x22U, 0x33U, \
-                                  0x44U, 0x55U, 0x66U, 0x77U, \
-                                  0x88U, 0x99U, 0xAAU, 0xBBU, \
-                                  0xCCU, 0xDDU, 0xEEU, 0xFFU }
-#elif SENSOR_NODE_ID == 2
-#define PROVISION_APP_KEY       { 0x2AU, 0x7FU, 0x13U, 0xC4U, \
-                                  0x9EU, 0x06U, 0xB8U, 0x51U, \
-                                  0x3DU, 0xE2U, 0x74U, 0xAFU, \
-                                  0x60U, 0x1CU, 0x95U, 0xD8U }
-#elif SENSOR_NODE_ID == 3
-#define PROVISION_APP_KEY       { 0x5BU, 0x08U, 0xE1U, 0x96U, \
-                                  0x34U, 0xCDU, 0x72U, 0xAFU, \
-                                  0x1EU, 0x60U, 0xB5U, 0x27U, \
-                                  0xD9U, 0x43U, 0x8CU, 0xF0U }
-#elif SENSOR_NODE_ID == 4
-#define PROVISION_APP_KEY       { 0x91U, 0x4CU, 0x26U, 0xD3U, \
-                                  0x5FU, 0xA8U, 0x07U, 0xEBU, \
-                                  0x62U, 0x1DU, 0xB4U, 0x78U, \
-                                  0x3AU, 0xC5U, 0xE9U, 0x20U }
-#else
-#define PROVISION_APP_KEY       { 0xC7U, 0x3EU, 0x8AU, 0x15U, \
-                                  0xD0U, 0x6BU, 0xF2U, 0x49U, \
-                                  0xA3U, 0x5CU, 0x91U, 0x2EU, \
-                                  0x87U, 0xF6U, 0x04U, 0xBDU }
-#endif
 
 /* =====================================================================
  * 2. MAPAREA PINILOR
@@ -391,10 +374,24 @@
 #define LORA_IRQ_RX_DONE              0x40U   /* NOU */
 #define LORA_IRQ_PAYLOAD_CRC_ERROR    0x20U   /* NOU */
 
-/* Cel mai lung pachet pe care il PRIMESTE senzorul este CMD_DOWN, 12
- * octeti (JOIN_ACCEPT are 10). 16 lasa loc si pentru cateva octete de
- * gunoi, ca un pachet strain sa fie citit si respins, nu taiat. */
-#define LORA_RX_BUFFER_LEN            16U
+/*
+ * Cel mai lung pachet pe care il PRIMESTE senzorul este acum CMD_DOWN,
+ * cu 4 octeti (JOIN_ACCEPT are 3). Valoarea de aici ajunge in
+ * RegMaxPayloadLength, deci modemul arunca SINGUR, in hardware, orice
+ * pachet mai lung - adica DATA_UP (13) si JOIN_REQ (10) ale celorlalte
+ * placi, inainte ca firmware-ul sa le vada.
+ *
+ * De ce 6 si nu 4: doi octeti de rezerva, ca un pachet abia mai lung sa
+ * fie citit si respins de filtrul software, nu taiat de modem.
+ *
+ * ATENTIE LA RECALIBRARE. Cat timp DATA_ENC avea 17 octeti si limita era
+ * 16, filtrul hardware exista din intamplare. Odata cu scurtarea
+ * pachetelor el ar fi disparut in tacere, si odata cu el jumatate din
+ * apararea ferestrei de downlink (F-035) - exact mecanismul de care
+ * depinde dezinrolarea cu cinci placi. Cine mai schimba lungimile de
+ * pachet trebuie sa reia calculul de aici.
+ */
+#define LORA_RX_BUFFER_LEN            6U
 
 /* =====================================================================
  * 4. PROTOCOLUL DE APLICATIE
@@ -406,48 +403,60 @@
  *  magic-ul 0xA5 din protocolul initial; ce s-a schimbat este ca octetul
  *  TYPE are acum mai multe valori.
  *
+ *  NIMIC NU MAI ESTE SEMNAT SAU CIFRAT. Nu exista MIC, nu exista cheie,
+ *  nu exista nonce. Vezi avertismentul din antetul fisierului.
+ *
+ *  CELE CINCI LUNGIMI SUNT DISTINCTE - 6 / 10 / 3 / 13 / 4 - si trebuie
+ *  sa ramana asa. Este singura verificare ramasa impotriva unei
+ *  desincronizari intre cele doua capete: perechea tip+lungime respinge
+ *  un pachet de format vechi, in loc sa-l interpreteze la offset-uri
+ *  gresite si sa scoata o temperatura plauzibila si gresita, in tacere.
+ *
  *  TYPE 0x01 - TEMP_PLAIN, pachetul vechi de 6 octeti (NESCHIMBAT):
  *    [0] 0xA5  [1] 0x01  [2..3] temp*100  [4] motiv
  *    [5] checksum = XOR(0..4) ^ 0x5A
  *
- *  MIC = primii 4 octeti din CBC-MAC-XTEA (sectiunea 6). Cifrul este
- *  XTEA-128, cu bloc de 8 octeti - vezi F-024 pentru motiv.
+ *  TYPE 0x10 - JOIN_REQ (senzor -> hub), 10 octeti:
+ *    [0] 0xA5  [1] 0x10  [2..9] DevEUI
  *
- *  TYPE 0x10 - JOIN_REQ (senzor -> hub), 16 octeti:
- *    [0] 0xA5  [1] 0x10  [2..9] DevEUI  [10..11] DevNonce
- *    [12..15] MIC = MAC(AppKey, [0..11])
+ *  DevEUI ramane pe fir desi hub-ul stie oricum ce numere exista: el este
+ *  cheia dupa care hub-ul verifica ca placa are voie, deriva numarul din
+ *  POZITIA in tabelul de provisioning (F-037) si o identifica in
+ *  "remove <DevEUI>". Daca JOIN_REQ ar purta doar numarul, senzorul si-ar
+ *  declara singur adresa - exact ce a reparat F-037.
  *
- *  TYPE 0x11 - JOIN_ACCEPT (hub -> senzor), 10 octeti:
- *    IV_join (8B) = 0x11 | DevNonce(2) | zero(5)
- *    [0] 0xA5  [1] 0x11
- *    [2..5] Enc = XTEA-CTR(AppKey, IV_join, DevAddr(1) | JoinNonce(3))
- *    [6..9] MIC = MAC(AppKey,
- *                     0x11 | DevEUI(8) | DevNonce(2) | DevAddr(1) | JoinNonce(3))
+ *  TYPE 0x11 - JOIN_ACCEPT (hub -> senzor), 3 octeti:
+ *    [0] 0xA5  [1] 0x11  [2] DevAddr
  *
- *  DevNonce este cel trimis chiar acum de senzor, deci un JOIN_ACCEPT
- *  rejucat dintr-o inrolare veche pica la verificarea MIC-ului.
+ *  DevAddr circula acum IN CLAR, si asta inchide ce F-035 lasase
+ *  dinadins netratat: senzorul poate filtra fereastra de join pe adresa,
+ *  fiindca stie de la compilare ce numar asteapta (SENSOR_NODE_ID). Doi
+ *  senzori care se inroleaza in aceeasi secunda nu-si mai fura fereastra.
  *
- *  SessKey (ambele capete, identic). MAC-ul da 8 octeti, cheia are 16,
- *  deci se cheama de doua ori, cu prefixe diferite:
- *    B = <prefix> | DevNonce(2) | JoinNonce(3) | DevAddr(1) | 0x00
- *    SessKey[0..7]  = MAC(AppKey, B cu prefix 0x01)
- *    SessKey[8..15] = MAC(AppKey, B cu prefix 0x02)
- *
- *  TYPE 0x12 - DATA_ENC (senzor -> hub), 17 octeti:
+ *  TYPE 0x12 - DATA_UP (senzor -> hub), 13 octeti:
  *    [0] 0xA5  [1] 0x12  [2] DevAddr  [3..6] FrameCounter
- *    [7..12] EncPayload = XTEA-CTR(SessKey, IV, pachetul TEMP de 6 octeti)
- *            IV (8B) = DevAddr(1) | FrameCounter(4) | 0x00 (uplink) | zero(2)
- *    [13..16] MIC = MAC(SessKey, [0..12])
+ *    [7..12] pachetul TEMP de 6 octeti, IN CLAR
  *
- *  TYPE 0x13 - CMD_DOWN (hub -> senzor), 12 octeti:
- *    [0] 0xA5  [1] 0x13  [2] DevAddr  [3..6] FrameCounter downlink
- *    [7] CmdType (0x01 = ACK, 0x02 = RESET)
- *    [8..11] MIC = MAC(SessKey, [0..7])
+ *  Numele nu mai este DATA_ENC: nu mai exista niciun "Enc". Valoarea
+ *  tipului ramane 0x12 - un pachet de firmware vechi are 17 octeti si
+ *  cade oricum la verificarea de lungime, ceea ce este simptomul util.
+ *  FrameCounter-ul ramane si devine singura aparare a caii de date; tot
+ *  el da hub-ului pachetele pierdute si detectia de repornire (F-036).
  *
- *  De ce ramane checksum-ul in interiorul payload-ului criptat, cand
- *  exista deja MIC: pachetul de 6 octeti ramane BIT CU BIT cel vechi,
- *  deci hub-ul il poate da neschimbat lui SensorPacketCodec::decode().
- *  Nicio logica noua de parsare a temperaturii, pe niciunul din capete.
+ *  TYPE 0x13 - CMD_DOWN (hub -> senzor), 4 octeti:
+ *    [0] 0xA5  [1] 0x13  [2] DevAddr  [3] CmdType (0x01 = ACK, 0x02 = RESET)
+ *
+ *  Contorul downlink a fost scos de pe fir. Fara MIC nu apara nimic - un
+ *  atacator nu are nevoie sa REIA un CMD_DOWN capturat, il fabrica din
+ *  patru octeti constanti - iar senzorul nu l-a citit niciodata. Pe hub,
+ *  downCounter ramane ca statistica locala in jurnal.
+ *
+ *  De ce ramane checksum-ul XOR in interiorul celor 6 octeti: pachetul
+ *  ramane BIT CU BIT cel vechi, deci hub-ul il da neschimbat lui
+ *  SensorPacketCodec::decode(). Nicio logica noua de parsare a
+ *  temperaturii, pe niciunul din capete. Nu este apararea de integritate
+ *  a pachetului - aceea este CRC-ul LoRa, activ pe ambele capete, care
+ *  acopera TOT payload-ul, inclusiv adresa si contorul.
  * ================================================================== */
 #define LORA_PACKET_MAGIC             0xA5U
 #define CHECKSUM_SALT                 0x5AU
@@ -455,33 +464,19 @@
 #define MSG_TYPE_TEMPERATURE          0x01U   /* TEMP_PLAIN */
 #define MSG_TYPE_JOIN_REQ             0x10U
 #define MSG_TYPE_JOIN_ACCEPT          0x11U
-#define MSG_TYPE_DATA_ENC             0x12U
+#define MSG_TYPE_DATA_UP              0x12U
 #define MSG_TYPE_CMD_DOWN             0x13U
 
 #define LORA_PACKET_LEN               6U      /* TEMP_PLAIN, neschimbat */
-#define JOIN_REQ_LEN                  16U
-#define JOIN_ACCEPT_LEN               10U
-#define DATA_ENC_LEN                  17U
-#define CMD_DOWN_LEN                  12U
+#define JOIN_REQ_LEN                  10U
+#define JOIN_ACCEPT_LEN               3U
+#define DATA_UP_LEN                   13U
+#define CMD_DOWN_LEN                  4U
 
 /* Cel mai lung pachet pe care il EMITE senzorul. */
-#define TX_BUFFER_LEN                 DATA_ENC_LEN
+#define TX_BUFFER_LEN                 DATA_UP_LEN
 
-/* Zonele acoperite de MIC, in octeti. Aceleasi numere apar in
- * hub/SolvixHub_Tests/SensorPacket.cpp si TestPairing.cpp. */
-#define JOIN_REQ_MIC_INPUT_LEN        12U
-#define JOIN_ACCEPT_MIC_INPUT_LEN     15U
-#define DATA_ENC_MIC_INPUT_LEN        13U
-#define CMD_DOWN_MIC_INPUT_LEN        8U
-
-/* Campul cifrat din JOIN_ACCEPT: DevAddr(1) + JoinNonce(3). */
-#define JOIN_ACCEPT_ENC_LEN           4U
-
-#define MIC_LEN                       4U
-#define CRYPTO_KEY_LEN                16U
 #define DEV_EUI_LEN                   8U
-#define DEV_NONCE_LEN                 2U
-#define JOIN_NONCE_LEN                3U
 
 #define CMD_TYPE_ACK                  0x01U
 #define CMD_TYPE_RESET                0x02U
@@ -519,21 +514,21 @@ static volatile uint8_t loraVersion = 0xFFU;
  *  Prima versiune a acestui fisier presupunea 16 si imparte HEF-ul in 8
  *  regiuni; ar fi fost o eroare tacuta si distructiva - scrierea
  *  "randului" de la 0x0F90 ar fi sters de fapt tot blocul 0x0F80-0x0F9F,
- *  adica DevEUI-ul odata cu AppKey.
+ *  adica DevEUI-ul odata cu ce mai statea in acelasi bloc.
  *
  *  In 128 de cuvinte incap deci EXACT 4 randuri, si asta a impus harta:
  *
  *  HARTA (4 randuri x 32 de cuvinte):
- *    rand 0  0x0F80  identitate : MAGIC(1) + DevEUI(8) + AppKey(16)
- *    rand 1  0x0FA0  sesiune    : MAGIC(1) + DevAddr(1) + JoinNonce(3) +
- *                                 DevNonce(2) + SessKey(16)
+ *    rand 0  0x0F80  identitate : MAGIC(1) + DevEUI(8)
+ *    rand 1  0x0FA0  sesiune    : MAGIC(1) + DevAddr(1)
  *    rand 2  0x0FC0  counter, slotul 0 : MAGIC(1) + FrameCounter(4)
  *    rand 3  0x0FE0  counter, slotul 1 : MAGIC(1) + FrameCounter(4)
  *
- *  Identitatea si sesiunea incap fiecare intr-un singur rand, ceea ce
- *  este chiar mai bine decat inainte: o inrolare inseamna acum o singura
- *  stergere/scriere, nu doua, iar DevEUI si AppKey nu mai pot fi
- *  desincronizate de o cadere de tensiune intre doua scrieri.
+ *  Randul de sesiune s-a golit odata cu criptografia: nu mai exista nici
+ *  SessKey, nici nonce-uri. Ce a ramas este exact bitul care conteaza -
+ *  PREZENTA marcajului inseamna "sunt inrolat, am voie sa vorbesc", iar
+ *  DevAddr il insoteste fiindca vine de la hub si fiindca din el iese
+ *  slotul de somn.
  *
  *  De ce un INEL pentru counter: se scrie prin rotatie in cele 2 randuri,
  *  deci uzura se imparte la 2. La citire se ia valoarea cea mai mare
@@ -561,16 +556,23 @@ static volatile uint8_t loraVersion = 0xFFU;
 
 /* Pozitiile campurilor in randul de identitate si in cel de sesiune. */
 #define HEF_OFF_EUI             1U
-#define HEF_OFF_APP_KEY         (HEF_OFF_EUI + DEV_EUI_LEN)          /*  9 */
 #define HEF_OFF_DEV_ADDR        1U
-#define HEF_OFF_JOIN_NONCE      2U
-#define HEF_OFF_DEV_NONCE       (HEF_OFF_JOIN_NONCE + JOIN_NONCE_LEN) /*  5 */
-#define HEF_OFF_SESS_KEY        (HEF_OFF_DEV_NONCE + DEV_NONCE_LEN)   /*  7 */
 
 /* Marcaje care spun ca o regiune a fost scrisa. Flash-ul sters citeste
- * 0xFF, deci orice valoare diferita de 0xFF merge ca marcaj. */
+ * 0xFF, deci orice valoare diferita de 0xFF merge ca marcaj.
+ *
+ * HEF_MAGIC_SESSION A FOST SCHIMBAT de la 0xC3 la 0xC4 odata cu
+ * scoaterea criptografiei, si nu este o toaleta cosmetica. Randul de
+ * sesiune vechi incepea cu 0xC3 urmat de DevAddr - adica EXACT formatul
+ * nou, octet cu octet. Cu marcajul neschimbat, firmware-ul acesta ar fi
+ * citit o sesiune veche ca valida si ar fi inceput sa emita catre un hub
+ * al carui registru tocmai fusese golit de REGISTRY_BLOB_VERSION = 4:
+ * cinci placi blocate in "DevAddr ... nu este inrolat", fiecare
+ * recuperabila doar cu trei secunde de buton, pe teren. Cu marcajul
+ * schimbat, ambele capete pornesc golite in acelasi commit si
+ * recuperarea este cea normala: `pair` pe hub plus butonul 2. */
 #define HEF_MAGIC_PROV          0xA7U
-#define HEF_MAGIC_SESSION       0xC3U
+#define HEF_MAGIC_SESSION       0xC4U
 #define HEF_MAGIC_FCNT          0xC5U
 
 /*
@@ -578,12 +580,12 @@ static volatile uint8_t loraVersion = 0xFFU;
  *
  * NU are toate cele 32 de cuvinte ale randului, ci doar atatea cate
  * folosim efectiv: cel mai plin rand este cel de identitate, cu
- * MAGIC(1) + DevEUI(8) + AppKey(16) = 25 de octeti. Restul latch-urilor
- * randului primesc direct 0xFF in HEF_WriteRow, fara sa mai treaca prin
- * RAM. Pe un device cu 256 de octeti de RAM, cei 7 octeti economisiti
- * aici chiar conteaza (F-025).
+ * MAGIC(1) + DevEUI(8) = 9 octeti. Restul latch-urilor randului primesc
+ * direct 0xFF in HEF_WriteRow, fara sa mai treaca prin RAM. Pe un device
+ * cu 256 de octeti de RAM, octetii economisiti aici chiar conteaza
+ * (F-025).
  */
-#define HEF_ROW_BUFFER_LEN      (1U + DEV_EUI_LEN + CRYPTO_KEY_LEN)   /* 25 */
+#define HEF_ROW_BUFFER_LEN      (1U + DEV_EUI_LEN)                    /*  9 */
 
 static uint8_t hefRowBuffer[HEF_ROW_BUFFER_LEN];
 
@@ -702,227 +704,42 @@ static void HEF_ClearRowBuffer(void)
 }
 
 /* =====================================================================
- * 6. XTEA-128: CIFRUL DE BLOC, CBC-MAC (MIC) SI CTR
+ * 6. CUVANTUL DE 32 DE BITI ACCESIBIL PE OCTETI
  * ---------------------------------------------------------------------
- *  DE CE XTEA SI NU AES (F-024)
- *  ------------------------------
- *  Prima versiune a acestui fisier folosea AES-128 cu AES-CMAC si
- *  AES-CTR. Masurat cu XC8 pe PIC16LF1508, firmware-ul complet cerea
- *  5250 de cuvinte de program si 286 de octeti de RAM. Device-ul are
- *  4096 de cuvinte si 256 de octeti. Nici macar cu toate cele trei
- *  solutii de rezerva aplicate simultan (fara criptarea payload-ului,
- *  fara descifrare, program de chei calculat din mers) nu se cobora sub
- *  4325 de cuvinte. AES pur si simplu NU incape aici.
+ *  Aici statea cifrul: XTEA-128, cu CBC-MAC pentru MIC si CTR pentru
+ *  criptare (F-024). A fost scos - vezi avertismentul din antetul
+ *  fisierului. Ultima versiune care il contine este commit-ul a710142.
  *
- *  Doar tabelele de substitutie ale AES ocupa 512 de cuvinte de program:
- *  un sfert din tot flash-ul disponibil, inainte de orice linie de cod.
+ *  Uniunea de mai jos NU a plecat cu el, desi fusese introdusa pentru
+ *  cifru. O folosesc Nvm_LoadFrameCounter, Nvm_SaveFrameCounter si
+ *  Packet_BuildDataUp - adica frame counter-ul, care nu are nicio
+ *  legatura cu criptografia. Stearsa din reflex odata cu restul
+ *  sectiunii, cele trei functii ar fi rescrise "cu shift-uri" si ar
+ *  reintroduce ~300 de cuvinte de program (F-028): o cincime din tot ce
+ *  s-a castigat scotand cifrul, pierduta fara ca nimeni sa observe,
+ *  fiindca marja este acum mare si nimic nu mai doare.
  *
- *  XTEA rezolva exact aceasta problema:
- *    - NU are niciun tabel: totul este adunare, XOR si deplasari pe 32
- *      de biti, deci nu consuma flash pe date constante;
- *    - are nevoie de o singura directie (cifrare), fiindca MIC-ul si
- *      criptarea sunt construite amandoua peste ea (CBC-MAC si CTR);
- *    - bloc de 64 de biti, cheie de 128 de biti - aceeasi dimensiune de
- *      cheie ca inainte, deci AppKey si SessKey raman de 16 octeti si
- *      provisioning-ul nu se schimba.
- *
- *  CE SE PIERDE fata de AES: XTEA are blocul de 64 de biti, nu 128, si
- *  nu are statutul de standard al AES. Pentru traficul acestui proiect -
- *  cateva zeci de mii de pachete de 6 octeti pe an, fiecare cu contor
- *  strict crescator - marginea este confortabila. Nu folosi acest cod
- *  pentru volume mari de date sub aceeasi cheie.
- *
- *  CE NU SE PIERDE: inrolarea, cheia de sesiune derivata, MIC-ul pe
- *  fiecare pachet, anti-replay-ul si confidentialitatea payload-ului
- *  raman toate exact ca in proiectarea initiala.
- *
- *  Numarul de runde este cel standard, 32 (adica 64 de "jumatati de
- *  runda"), cu DELTA = 0x9E3779B9.
- *
- *  OGLINDIT pe hub in hub/SolvixHub_Tests/HubCrypto.cpp, care face
- *  aceleasi trei operatii, octet cu octet.
+ *  SECTIUNEA ISI PASTREAZA NUMARUL 6 desi si-a schimbat continutul.
+ *  Renumerotarea celor 16 sectiuni ar invalida fiecare referinta
+ *  "sectiunea N" din CLAUDE.md si din comentariile de mai jos.
  * ================================================================== */
 
-#define XTEA_ROUNDS             32U
-#define XTEA_BLOCK_LEN          8U
-#define XTEA_DELTA              0x9E3779B9UL
-
 /*
- * Cuvant de 32 de biti accesibil si pe octeti (F-028).
- *
  * PIC16 nu are decat un acumulator de 8 biti: fiecare deplasare a unui
  * uint32 cu un numar de pozitii devine o bucla din biblioteca XC8 si
  * costa zeci de cuvinte de program. Impachetarea si despachetarea
- * big-endian scrise "cu shift-uri" ne costau singure peste 300 de
- * cuvinte, pe un device care are 4096 in total.
+ * big-endian scrise "cu shift-uri" costau singure peste 300 de cuvinte,
+ * pe un device care are 4096 in total.
  *
  * XC8 stocheaza intregii little-endian, deci octetul cel mai
- * semnificativ este byte[3]. Toate conversiile de mai jos sunt simple
- * mutari de octeti, fara nicio deplasare.
+ * semnificativ este byte[3]. Toate conversiile sunt simple mutari de
+ * octeti, fara nicio deplasare.
  */
 typedef union
 {
     uint32_t word;
     uint8_t  byte[4];       /* byte[0] = cel mai putin semnificativ */
 } Word32;
-
-/* Cheia activa, despachetata in cuvinte de 32 de biti (big-endian).
- * Se reincarca la fiecare comutare AppKey <-> SessKey. */
-static Word32 xteaKey[4];
-
-/* Incarca o cheie de 16 octeti. Octetii se citesc big-endian, ca peste
- * tot in protocol. */
-static void Xtea_LoadKey(const uint8_t *key)
-{
-    uint8_t i;
-
-    for (i = 0U; i < 4U; i++)
-    {
-        xteaKey[i].byte[3] = key[(i * 4U) + 0U];
-        xteaKey[i].byte[2] = key[(i * 4U) + 1U];
-        xteaKey[i].byte[1] = key[(i * 4U) + 2U];
-        xteaKey[i].byte[0] = key[(i * 4U) + 3U];
-    }
-}
-
-/*
- * Cifreaza un bloc de 8 octeti, pe loc, cu cheia deja incarcata.
- * Este SINGURA primitiva criptografica din firmware: MIC-ul (CBC-MAC) si
- * criptarea (CTR) se construiesc amandoua peste ea, deci nu exista cod
- * de descifrare nicaieri.
- */
-static void Xtea_EncryptBlock(uint8_t *block)
-{
-    Word32  v0;
-    Word32  v1;
-    Word32  sum;
-    uint8_t round;
-
-    v0.byte[3] = block[0];
-    v0.byte[2] = block[1];
-    v0.byte[1] = block[2];
-    v0.byte[0] = block[3];
-    v1.byte[3] = block[4];
-    v1.byte[2] = block[5];
-    v1.byte[1] = block[6];
-    v1.byte[0] = block[7];
-    sum.word   = 0UL;
-
-    for (round = 0U; round < XTEA_ROUNDS; round++)
-    {
-        /* sum & 3 = cei doi biti de jos, deci doar octetul de jos. */
-        v0.word += ((((v1.word << 4) ^ (v1.word >> 5)) + v1.word) ^
-                    (sum.word + xteaKey[sum.byte[0] & 3U].word));
-
-        sum.word += XTEA_DELTA;
-
-        /* (sum >> 11) & 3 = bitii 11 si 12, adica bitii 3 si 4 din
-         * octetul 1 - tot fara nicio deplasare pe 32 de biti. */
-        v1.word += ((((v0.word << 4) ^ (v0.word >> 5)) + v0.word) ^
-                    (sum.word +
-                     xteaKey[(uint8_t)(sum.byte[1] >> 3) & 3U].word));
-    }
-
-    block[0] = v0.byte[3];
-    block[1] = v0.byte[2];
-    block[2] = v0.byte[1];
-    block[3] = v0.byte[0];
-    block[4] = v1.byte[3];
-    block[5] = v1.byte[2];
-    block[6] = v1.byte[1];
-    block[7] = v1.byte[0];
-}
-
-/*
- * CBC-MAC peste "length" octeti, cu cheia deja incarcata. Ultimul bloc
- * se completeaza cu zerouri. Rezultatul are 8 octeti; MIC-ul
- * protocolului este format din primii MIC_LEN dintre ei.
- *
- * DE CE ESTE SIGUR UN CBC-MAC SIMPLU AICI, fara subchei ca la CMAC:
- * CBC-MAC este nesigur doar pentru mesaje de lungime VARIABILA, unde un
- * atacator poate combina doua mesaje valide. In protocolul nostru:
- *   - fiecare tip de mesaj are lungime FIXA (JOIN_REQ 12, DATA_ENC 13,
- *     CMD_DOWN 8, JOIN_ACCEPT 15 octeti acoperiti);
- *   - octetul TYPE, care distinge tipurile, se afla in PRIMUL bloc al
- *     zonei acoperite, deci doua tipuri diferite nu pot avea acelasi
- *     prefix;
- *   - JOIN_* folosesc AppKey, iar DATA/CMD folosesc SessKey, deci cele
- *     doua familii nici macar nu impart cheia.
- * Daca vreodata se adauga un mesaj de lungime variabila, aceasta
- * constructie TREBUIE inlocuita cu una cu prefix de lungime.
- */
-static void Xtea_MacWithLoadedKey(const uint8_t *message, uint8_t length,
-                                  uint8_t *mac)
-{
-    uint8_t i;
-    uint8_t offset;
-
-    for (i = 0U; i < XTEA_BLOCK_LEN; i++)
-    {
-        mac[i] = 0U;
-    }
-
-    for (offset = 0U; offset < length;
-         offset = (uint8_t)(offset + XTEA_BLOCK_LEN))
-    {
-        for (i = 0U; i < XTEA_BLOCK_LEN; i++)
-        {
-            if ((uint8_t)(offset + i) < length)
-            {
-                mac[i] ^= message[offset + i];
-            }
-        }
-        Xtea_EncryptBlock(mac);
-    }
-}
-
-/*
- * XTEA-CTR peste "length" octeti. Blocul contor este dat de apelant;
- * aceeasi functie cripteaza si decripteaza.
- * Payload-ul nostru are 6 octeti si campul cifrat din JOIN_ACCEPT are 4,
- * deci se consuma un singur bloc de flux - dar bucla trateaza corect si
- * cazul general.
- */
-static void Xtea_CtrWithLoadedKey(const uint8_t *iv, uint8_t *data,
-                                  uint8_t length)
-{
-    uint8_t counter[XTEA_BLOCK_LEN];
-    uint8_t stream[XTEA_BLOCK_LEN];
-    uint8_t i;
-    uint8_t done = 0U;
-    uint8_t chunk;
-
-    for (i = 0U; i < XTEA_BLOCK_LEN; i++)
-    {
-        counter[i] = iv[i];
-    }
-
-    while (done < length)
-    {
-        for (i = 0U; i < XTEA_BLOCK_LEN; i++)
-        {
-            stream[i] = counter[i];
-        }
-        Xtea_EncryptBlock(stream);
-
-        chunk = (uint8_t)(length - done);
-        if (chunk > XTEA_BLOCK_LEN)
-        {
-            chunk = XTEA_BLOCK_LEN;
-        }
-
-        for (i = 0U; i < chunk; i++)
-        {
-            data[done + i] ^= stream[i];
-        }
-
-        done = (uint8_t)(done + chunk);
-
-        /* Incrementare pe ultimul octet: pachetele noastre nu depasesc
-         * niciodata un bloc, deci nu e nevoie de propagarea carry-ului. */
-        counter[XTEA_BLOCK_LEN - 1U]++;
-    }
-}
 
 /* =====================================================================
  * 7. STAREA DEVICE-ULUI (identitate, sesiune, contoare)
@@ -942,18 +759,15 @@ static void Xtea_CtrWithLoadedKey(const uint8_t *iv, uint8_t *data,
 #define DEV_STATE_IDLE          2U
 
 static uint8_t  devEui[DEV_EUI_LEN];
-static uint8_t  sessKey[CRYPTO_KEY_LEN];
-static uint8_t  devAddr;
-static uint8_t  joinNonce[JOIN_NONCE_LEN];
-static uint8_t  devNonce[DEV_NONCE_LEN];
+static uint8_t  devAddr = SENSOR_NODE_ID;
 
 /*
- * AppKey NU se tine in RAM (F-029). Sta permanent in HEF si se citeste
- * de acolo direct in cifru, in Key_UseApp(). Cei 16 octeti economisiti
- * sunt ce face diferenta intre "intra" si "nu intra" pe configuratia de
- * DEBUG, unde depanatorul isi rezerva el insusi 16 octeti de RAM.
- * Costul este de 16 citiri din memoria de program per comutare de cheie,
- * si numai pe calea de inrolare - calea de date foloseste SessKey.
+ * devAddr porneste cu SENSOR_NODE_ID, nu cu 0, si ramane asa si dupa o
+ * dezinrolare. Nu este o presupunere despre ce va spune hub-ul, ci
+ * numarul pe care aceasta placa il ASTEAPTA: hub-ul il deriva din
+ * pozitia DevEUI-ului in tabelul de provisioning (F-037), deci cele doua
+ * trebuie sa coincida. Valoarea este folosita ca filtru in fereastra de
+ * receptie inca din starea JOINING - vezi LoRa_Receive.
  */
 
 static uint8_t  deviceState = DEV_STATE_IDLE;
@@ -971,106 +785,43 @@ static uint8_t  fcntSlot = 0U;
  * nicio risipa (F-025). */
 static uint8_t  txBuffer[TX_BUFFER_LEN];
 static uint8_t  rxBuffer[LORA_RX_BUFFER_LEN];
-static uint8_t  cryptoBlock[XTEA_BLOCK_LEN];
-static uint8_t  macBuffer[XTEA_BLOCK_LEN];
-static uint8_t  micInput[JOIN_ACCEPT_MIC_INPUT_LEN];
-
-/* Ce cheie este incarcata acum in xteaKey, ca sa nu o reincarcam degeaba
- * (despachetarea celor 16 octeti in 4 cuvinte costa). */
-#define KEY_NONE                0U
-#define KEY_APP                 1U
-#define KEY_SESSION             2U
-static uint8_t loadedKeyId = KEY_NONE;
-
-/*
- * Trece cifrul pe AppKey, citind-o DIRECT DIN HEF (F-029). Nu exista o
- * copie in RAM: cheia nu se schimba niciodata dupa provisioning, iar
- * cele 16 citiri din memoria de program se fac doar cand se comuta
- * cheia, adica pe calea de inrolare.
- */
-static void Key_UseApp(void)
-{
-    uint8_t i;
-    uint16_t base;
-
-    if (loadedKeyId == KEY_APP)
-    {
-        return;
-    }
-
-    base = (uint16_t)(HEF_ROW_IDENTITY + HEF_OFF_APP_KEY);
-
-    for (i = 0U; i < 4U; i++)
-    {
-        xteaKey[i].byte[3] = HEF_ReadByte((uint16_t)(base + (i * 4U) + 0U));
-        xteaKey[i].byte[2] = HEF_ReadByte((uint16_t)(base + (i * 4U) + 1U));
-        xteaKey[i].byte[1] = HEF_ReadByte((uint16_t)(base + (i * 4U) + 2U));
-        xteaKey[i].byte[0] = HEF_ReadByte((uint16_t)(base + (i * 4U) + 3U));
-    }
-
-    loadedKeyId = KEY_APP;
-}
-
-/* Trece cifrul pe SessKey. */
-static void Key_UseSession(void)
-{
-    if (loadedKeyId != KEY_SESSION)
-    {
-        Xtea_LoadKey(sessKey);
-        loadedKeyId = KEY_SESSION;
-    }
-}
-
-/* Compara MIC-ul primit cu cel calculat, pe MIC_LEN octeti. */
-static uint8_t Mic_Matches(const uint8_t *received, const uint8_t *computed)
-{
-    uint8_t i;
-    uint8_t diff = 0U;
-
-    for (i = 0U; i < MIC_LEN; i++)
-    {
-        diff |= (uint8_t)(received[i] ^ computed[i]);
-    }
-
-    return (uint8_t)((diff == 0U) ? 1U : 0U);
-}
 
 /* =====================================================================
  * 8. CITIREA SI SCRIEREA STARII IN HEF
  * ================================================================== */
 
 /*
- * Identitatea: DevEUI + AppKey, amandoua in acelasi rand. Daca randul
- * este gol (marcaj lipsa), se scriu valorile de compilare din
- * PROVISION_*. Asa o placa noua se auto-provizioneaza la prima pornire.
+ * Identitatea: DevEUI, singur in randul lui. Daca randul este gol
+ * (marcaj lipsa), se scrie valoarea de compilare din PROVISION_DEV_EUI.
+ * Asa o placa noua se auto-provizioneaza la prima pornire.
  *
- * DACA RANDUL EXISTA DAR CONTINE ALT DevEUI, se rescrie tot. Cazul apare
+ * DACA RANDUL EXISTA DAR CONTINE ALT DevEUI, se rescrie. Cazul apare
  * exact cand o placa deja folosita este reprogramata cu alt
  * SENSOR_NODE_ID - de exemplu fiindca senzorul #2 s-a ars si i se ia
  * locul cu o placa de rezerva. Fara verificarea asta, HEF-ul ar pastra
  * identitatea VECHE si placa ar continua sa se prezinte cu numarul
- * vechi, in timp ce firmware-ul de pe ea spune altceva: pe hub s-ar
- * vedea "MIC gresit" (cheia compilata nu se mai potriveste cu DevEUI-ul
- * din HEF) si nicio cautare in cod nu ar duce nicaieri, fiindca sursa
- * este corecta. Este acelasi gen de capcana ca F-033, dar cu starea
- * ne-volatila in loc de directorul de build.
+ * vechi, in timp ce firmware-ul de pe ea spune altceva, iar nicio
+ * cautare in cod nu ar duce nicaieri, fiindca sursa este corecta. Este
+ * acelasi gen de capcana ca F-033, dar cu starea ne-volatila in loc de
+ * directorul de build.
  *
- * Odata cu identitatea se sterge si SESIUNEA: o cheie de sesiune este
- * legata de identitatea cu care a fost negociata, deci nu mai are ce
- * cauta acolo. Placa porneste in DEV_STATE_IDLE si asteapta o inrolare
- * noua, ceea ce si trebuie.
+ * VERIFICAREA ASTA A DEVENIT MAI IMPORTANTA decat era. Cat timp exista
+ * MIC, o identitate desincronizata se vedea si pe hub, ca un sir de
+ * "MIC gresit". Acum acel al doilea simptom nu mai exista, deci
+ * rescrierea de aici este singurul lucru care mai prinde cazul.
+ *
+ * Odata cu identitatea se sterge si SESIUNEA: dreptul de a vorbi a fost
+ * dat identitatii vechi, deci nu mai are ce cauta acolo. Placa porneste
+ * in DEV_STATE_IDLE si asteapta o inrolare noua, ceea ce si trebuie.
  *
  * Verificarea nu costa o scriere in plus la fiecare pornire: se compara
  * doar, si se scrie exclusiv cand chiar difera.
  *
- * DevEUI ajunge in RAM, fiindca intra in fiecare JOIN_REQ. AppKey NU:
- * ramane doar in HEF si se citeste de acolo direct in cifru, in
- * Key_UseApp() (F-029).
+ * DevEUI ajunge in RAM, fiindca intra in fiecare JOIN_REQ.
  */
 static void Nvm_LoadOrCreateProvisioning(void)
 {
     static const uint8_t defaultEui[DEV_EUI_LEN] = PROVISION_DEV_EUI;
-    static const uint8_t defaultKey[CRYPTO_KEY_LEN] = PROVISION_APP_KEY;
 
     uint8_t i;
     uint8_t same;
@@ -1094,7 +845,7 @@ static void Nvm_LoadOrCreateProvisioning(void)
             return;
         }
 
-        /* Placa a fost reprogramata cu alt SENSOR_NODE_ID: sesiunea
+        /* Placa a fost reprogramata cu alt SENSOR_NODE_ID: inrolarea
          * veche apartine identitatii vechi. */
         HEF_EraseRow(HEF_ROW_SESSION);
     }
@@ -1112,19 +863,18 @@ static void Nvm_LoadOrCreateProvisioning(void)
     {
         hefRowBuffer[HEF_OFF_EUI + i] = devEui[i];
     }
-    for (i = 0U; i < CRYPTO_KEY_LEN; i++)
-    {
-        hefRowBuffer[HEF_OFF_APP_KEY + i] = defaultKey[i];
-    }
     HEF_WriteRow(HEF_ROW_IDENTITY);
 }
 
-/* Intoarce 1 daca in HEF exista o sesiune valida (deci senzorul este
- * deja inrolat) si o incarca in RAM. */
+/*
+ * Intoarce 1 daca in HEF exista o inrolare valida, si incarca DevAddr.
+ *
+ * Randul de sesiune s-a golit odata cu criptografia: ce a mai ramas este
+ * PREZENTA marcajului, adica bitul "sunt inrolat, am voie sa vorbesc",
+ * plus numarul primit de la hub.
+ */
 static uint8_t Nvm_LoadSession(void)
 {
-    uint8_t i;
-
     if (HEF_ReadByte(HEF_ROW_SESSION) != HEF_MAGIC_SESSION)
     {
         return 0U;
@@ -1132,71 +882,36 @@ static uint8_t Nvm_LoadSession(void)
 
     devAddr = HEF_ReadByte((uint16_t)(HEF_ROW_SESSION + HEF_OFF_DEV_ADDR));
 
-    for (i = 0U; i < JOIN_NONCE_LEN; i++)
-    {
-        joinNonce[i] = HEF_ReadByte((uint16_t)(HEF_ROW_SESSION +
-                                               HEF_OFF_JOIN_NONCE + i));
-    }
-    for (i = 0U; i < DEV_NONCE_LEN; i++)
-    {
-        devNonce[i] = HEF_ReadByte((uint16_t)(HEF_ROW_SESSION +
-                                              HEF_OFF_DEV_NONCE + i));
-    }
-    for (i = 0U; i < CRYPTO_KEY_LEN; i++)
-    {
-        sessKey[i] = HEF_ReadByte((uint16_t)(HEF_ROW_SESSION +
-                                             HEF_OFF_SESS_KEY + i));
-    }
-
     /* Un DevAddr de 0x00 sau 0xFF inseamna rand corupt sau nescris. */
     if ((devAddr == 0x00U) || (devAddr == 0xFFU))
     {
+        devAddr = SENSOR_NODE_ID;
         return 0U;
     }
 
     return 1U;
 }
 
-/* Toata sesiunea incape intr-un singur rand, deci se scrie dintr-o
- * singura stergere+scriere: o cadere de tensiune nu mai poate lasa
- * DevAddr salvat fara SessKey. */
+/* Inrolarea incape intr-un singur rand: o stergere + o scriere. */
 static void Nvm_SaveSession(void)
 {
-    uint8_t i;
-
     HEF_ClearRowBuffer();
     hefRowBuffer[0] = HEF_MAGIC_SESSION;
     hefRowBuffer[HEF_OFF_DEV_ADDR] = devAddr;
-    for (i = 0U; i < JOIN_NONCE_LEN; i++)
-    {
-        hefRowBuffer[HEF_OFF_JOIN_NONCE + i] = joinNonce[i];
-    }
-    for (i = 0U; i < DEV_NONCE_LEN; i++)
-    {
-        hefRowBuffer[HEF_OFF_DEV_NONCE + i] = devNonce[i];
-    }
-    for (i = 0U; i < CRYPTO_KEY_LEN; i++)
-    {
-        hefRowBuffer[HEF_OFF_SESS_KEY + i] = sessKey[i];
-    }
     HEF_WriteRow(HEF_ROW_SESSION);
 }
 
-/* Sterge sesiunea: senzorul redevine ne-inrolat (comanda RESET). */
+/*
+ * Sterge inrolarea: senzorul redevine ne-inrolat (comanda RESET).
+ *
+ * devAddr NU se pune pe 0, ci inapoi pe SENSOR_NODE_ID: este numarul pe
+ * care placa il asteapta oricum de la hub, si ramane filtrul ferestrei
+ * de receptie in starea JOINING (vezi LoRa_Receive).
+ */
 static void Nvm_EraseSession(void)
 {
-    uint8_t i;
-
     HEF_EraseRow(HEF_ROW_SESSION);
-
-    devAddr = 0U;
-    for (i = 0U; i < CRYPTO_KEY_LEN; i++)
-    {
-        sessKey[i] = 0U;
-    }
-
-    /* Cheia incarcata in cifru nu mai are voie sa fie considerata valida. */
-    loadedKeyId = KEY_NONE;
+    devAddr = SENSOR_NODE_ID;
 }
 
 /*
@@ -1434,32 +1149,47 @@ static uint8_t LoRa_SendBuffer(const uint8_t *data, uint8_t length)
  *   - citirea din FIFO de la FifoRxCurrentAddr, cu lungimea din
  *     RegRxNbBytes.
  *
- * "wantType" ESTE OBLIGATORIU SI NU ESTE O COMODITATE. Cat timp exista
- * un singur senzor, orice pachet auzit in fereastra proprie era, prin
- * constructie, raspunsul hub-ului. Cu HUB_MAX_SENSORS = 5 placi pe
- * acelasi canal, in fereastra de 600 ms a senzorului A poate intra la
- * fel de bine un CMD_DOWN adresat lui B: fara filtru, functia s-ar
- * intoarce cu ACEL pachet, apelantul l-ar respinge (MIC-ul sau adresa nu
- * se potrivesc) si fereastra s-ar fi INCHIS DEJA. Senzorul A si-ar rata
+ * ACEASTA FUNCTIE ESTE SINGURUL PUNCT DE VALIDARE A RECEPTIEI. Odata cu
+ * criptografia au disparut si Packet_ParseJoinAccept si
+ * Packet_ParseCommand, care nu mai aveau ce verifica in afara de magic,
+ * tip, lungime si adresa - adica fix ce se face aici, dar mai devreme.
+ * Cine muta validarea inapoi "unde ii e locul" reintroduce F-035: ca sa
+ * apere fereastra, verificarea trebuie facuta INAINTE de a o inchide.
+ *
+ * FILTRUL ESTE PARTE DIN FUNCTIONALITATE, NU O OPTIMIZARE. Cu
+ * HUB_MAX_SENSORS = 5 placi pe acelasi canal, in fereastra de 600 ms a
+ * senzorului A poate intra la fel de bine un CMD_DOWN adresat lui B:
+ * fara filtru, functia s-ar intoarce cu ACEL pachet, apelantul l-ar
+ * respinge si fereastra s-ar fi INCHIS DEJA. Senzorul A si-ar rata
  * propriul raspuns, iar pe calea de dezinrolare asta inseamna exact
- * fundatura din F-031: un RESET are o singura sansa per ciclu.
+ * fundatura din F-031: un RESET are o singura sansa per ciclu. Pachetele
+ * straine sunt deci aruncate SI receptia continua cu timpul ramas, exact
+ * ca la un CRC gresit.
  *
- * Filtrul este deci parte din functionalitate, nu o optimizare:
- * pachetele care nu ne apartin sunt aruncate SI receptia continua cu
- * timpul ramas, exact ca la un CRC gresit. Se verifica magic-ul, tipul
- * si - pentru CMD_DOWN, singurul tip care poarta adresa in clar -
- * DevAddr. MIC-ul ramane treaba apelantului: el are cheia.
+ * Se verifica magic-ul, tipul, LUNGIMEA EXACTA si DevAddr. Adresa se
+ * verifica acum pentru AMBELE tipuri primite, nu doar pentru CMD_DOWN:
+ * de cand JOIN_ACCEPT nu mai este cifrat, DevAddr circula in clar si
+ * acolo, iar senzorul stie de la compilare ce numar asteapta
+ * (SENSOR_NODE_ID). Doi senzori care se inroleaza in aceeasi secunda nu
+ * isi mai fura fereastra - lucrul pe care F-035 il lasase netratat
+ * tocmai fiindca adresa era cifrata.
  *
- * Al doilea filtru, gratuit, este hardware: RegMaxPayloadLength = 16
- * (sectiunea 3), iar DATA_ENC are 17 octeti. Modemul arunca singur
- * pachetele de date ale celorlalti senzori, inainte sa ajunga la noi.
+ * Verificarea de lungime tine loc si de diagnostic pentru capetele
+ * desincronizate: un pachet de firmware vechi are alta lungime si cade
+ * aici, in loc sa fie citit la offset-uri gresite.
  *
- * Intoarce 1 daca s-a primit un pachet cu CRC bun SI de tipul cerut, iar
- * "*length" primeste numarul de octeti cititi (cel mult maxLength).
+ * Al doilea filtru, gratuit, este hardware: RegMaxPayloadLength =
+ * LORA_RX_BUFFER_LEN (sectiunea 3). Cel mai lung pachet pe care il
+ * PRIMESTE senzorul este CMD_DOWN, cu 4 octeti, deci modemul arunca
+ * singur si DATA_UP (13), si JOIN_REQ (10) ale celorlalte placi, inainte
+ * sa ajunga la noi.
+ *
+ * Intoarce 1 daca s-a primit un pachet cu CRC bun, de tipul si lungimea
+ * cerute, adresat noua.
  */
 static uint8_t LoRa_Receive(uint8_t *buffer, uint8_t maxLength,
                             uint8_t *length, uint16_t timeoutMs,
-                            uint8_t wantType)
+                            uint8_t wantType, uint8_t wantLen)
 {
     uint16_t waited;
     uint8_t  flags;
@@ -1507,10 +1237,10 @@ static uint8_t LoRa_Receive(uint8_t *buffer, uint8_t maxLength,
             /* Filtrul multi-senzor. Un pachet strain este aruncat si
              * receptia CONTINUA, cu timpul ramas: fereastra nu are voie
              * sa fie consumata de vorba altcuiva. */
-            if ((received < 3U) ||
+            if ((received != wantLen) ||
                 (buffer[0] != LORA_PACKET_MAGIC) ||
                 (buffer[1] != wantType) ||
-                ((wantType == MSG_TYPE_CMD_DOWN) && (buffer[2] != devAddr)))
+                (buffer[2] != devAddr))
             {
                 LoRa_WriteRegister(LORA_REG_IRQ_FLAGS, 0xFFU);
                 __delay_ms(1);
@@ -1746,7 +1476,7 @@ static uint8_t Button_RawPressed(void)
      * comentat: butonul 2 are acum o functie proprie (pairing manual,
      * ButtonPair_HeldLong). Daca ar forta si transmisii, cele trei
      * secunde de tinut apasat ar declansa in acelasi timp si fereastra
-     * de pairing, si un sir de DATA_ENC pe acelasi canal.
+     * de pairing, si un sir de DATA_UP pe acelasi canal.
      * if (BUTTON_SPARE_PORT != 0U) { return 1U; }
      */
 
@@ -1879,7 +1609,7 @@ static void Led_ShowJoinFailure(void)
  * ================================================================== */
 
 /* Pachetul de temperatura de 6 octeti - EXACT cel dinainte. Este si
- * payload-ul care se cripteaza in DATA_ENC. */
+ * payload-ul pe care il transporta DATA_UP. */
 static void Packet_BuildTemperature(uint8_t *packet, int16_t tempX100,
                                     uint8_t reason)
 {
@@ -1901,77 +1631,13 @@ static void Packet_BuildTemperature(uint8_t *packet, int16_t tempX100,
 }
 
 /*
- * DevNonce nou. PIC-ul nu are RNG (presupunerea 10): amestecam bitii cei
- * mai putin semnificativi ai unor citiri ADC succesive - care variaza cu
- * zgomotul de pe divizor - cu frame counter-ul, care este diferit la
- * fiecare incercare. Scopul este strict sa nu repetam un nonce, nu sa
- * obtinem entropie criptografica.
- */
-static void Nonce_Generate(void)
-{
-    uint16_t value = 0U;
-    uint8_t  i;
-
-    for (i = 0U; i < 16U; i++)
-    {
-        value = (uint16_t)((value << 1) | (uint16_t)(ADC_ReadRaw() & 0x0001U));
-        __delay_ms(1);
-    }
-
-    value ^= (uint16_t)(frameCounter & 0xFFFFUL);
-
-    /* 0x0000 ar arata ca un camp nescris; il evitam. */
-    if (value == 0U)
-    {
-        value = 1U;
-    }
-
-    devNonce[0] = (uint8_t)((value >> 8) & 0xFFU);
-    devNonce[1] = (uint8_t)(value & 0xFFU);
-}
-
-/*
- * Cheia de sesiune, derivata din AppKey si din cele doua nonce-uri.
+ * JOIN_REQ: 10 octeti, in clar.
  *
- * MAC-ul da 8 octeti, iar cheia are 16, deci se cheama de doua ori,
- * peste acelasi bloc dar cu prefix diferit:
- *   B = <prefix> | DevNonce(2) | JoinNonce(3) | DevAddr(1) | 0x00
- *   SessKey[0..7]  = MAC(AppKey, B cu prefix 0x01)
- *   SessKey[8..15] = MAC(AppKey, B cu prefix 0x02)
- * Blocul are exact 8 octeti, cat blocul cifrului, deci nu apare padding.
- * Hub-ul face aceeasi operatie, octet cu octet.
+ * Nu mai exista DevNonce: singurele lui roluri erau criptografice
+ * (anti-replay pe JOIN_REQ, intrare in derivarea cheii, IV pentru
+ * JOIN_ACCEPT). Un nonce care apara impotriva reluarii unui mesaj pe
+ * care oricine il poate FABRICA nu apara nimic.
  */
-static void Session_DeriveKey(void)
-{
-    uint8_t i;
-
-    cryptoBlock[0] = 0x01U;
-    cryptoBlock[1] = devNonce[0];
-    cryptoBlock[2] = devNonce[1];
-    cryptoBlock[3] = joinNonce[0];
-    cryptoBlock[4] = joinNonce[1];
-    cryptoBlock[5] = joinNonce[2];
-    cryptoBlock[6] = devAddr;
-    cryptoBlock[7] = 0x00U;
-
-    Key_UseApp();
-    Xtea_MacWithLoadedKey(cryptoBlock, XTEA_BLOCK_LEN, macBuffer);
-    for (i = 0U; i < XTEA_BLOCK_LEN; i++)
-    {
-        sessKey[i] = macBuffer[i];
-    }
-
-    cryptoBlock[0] = 0x02U;
-    Xtea_MacWithLoadedKey(cryptoBlock, XTEA_BLOCK_LEN, macBuffer);
-    for (i = 0U; i < XTEA_BLOCK_LEN; i++)
-    {
-        sessKey[XTEA_BLOCK_LEN + i] = macBuffer[i];
-    }
-
-    /* Cifrul are inca AppKey incarcata - nu am atins-o. */
-}
-
-/* JOIN_REQ: 16 octeti, semnat cu AppKey. */
 static void Packet_BuildJoinRequest(void)
 {
     uint8_t i;
@@ -1983,99 +1649,18 @@ static void Packet_BuildJoinRequest(void)
     {
         txBuffer[2U + i] = devEui[i];
     }
-
-    txBuffer[10] = devNonce[0];
-    txBuffer[11] = devNonce[1];
-
-    Key_UseApp();
-    Xtea_MacWithLoadedKey(txBuffer, JOIN_REQ_MIC_INPUT_LEN, macBuffer);
-
-    for (i = 0U; i < MIC_LEN; i++)
-    {
-        txBuffer[JOIN_REQ_MIC_INPUT_LEN + i] = macBuffer[i];
-    }
 }
 
 /*
- * Verifica un JOIN_ACCEPT si, daca este bun, umple devAddr + joinNonce.
- * Pasii sunt exact inversul a ce face hub-ul:
- *   1) cei 4 octeti cifrati se trec prin XTEA-CTR cu AppKey si cu
- *      IV_join = 0x11 | DevNonce(2) | zero(5) -> DevAddr + JoinNonce.
- *      CTR este simetric, deci NU exista cod de descifrare in firmware;
- *   2) se recalculeaza MIC-ul peste 0x11 | DevEUI | DevNonce | DevAddr |
- *      JoinNonce si se compara cu cel primit.
- * DevNonce este cel trimis de noi in JOIN_REQ chiar acum, deci un
- * JOIN_ACCEPT rejucat dintr-o inrolare veche pica la pasul 2 - si, in
- * plus, s-ar descifra in gunoi, fiindca IV-ul depinde tot de DevNonce.
+ * DATA_UP: 13 octeti. Antet, adresa, frame counter, apoi pachetul de
+ * temperatura de 6 octeti IN CLAR - bit cu bit cel vechi, ca hub-ul sa-l
+ * dea neschimbat lui SensorPacketCodec::decode().
+ *
+ * Frame counter-ul se impacheteaza big-endian prin uniunea Word32, nu cu
+ * deplasari pe 32 de biti: pe PIC16 fiecare shift de uint32 este o bucla
+ * din biblioteca XC8 (F-028).
  */
-static uint8_t Packet_ParseJoinAccept(const uint8_t *packet, uint8_t length)
-{
-    uint8_t i;
-    uint8_t candidateAddr;
-    uint8_t plain[JOIN_ACCEPT_ENC_LEN];
-
-    if (length != JOIN_ACCEPT_LEN)                 return 0U;
-    if (packet[0] != LORA_PACKET_MAGIC)            return 0U;
-    if (packet[1] != MSG_TYPE_JOIN_ACCEPT)         return 0U;
-
-    Key_UseApp();
-
-    /* IV_join = 0x11 | DevNonce(2) | zero(5). */
-    for (i = 0U; i < XTEA_BLOCK_LEN; i++)
-    {
-        cryptoBlock[i] = 0U;
-    }
-    cryptoBlock[0] = MSG_TYPE_JOIN_ACCEPT;
-    cryptoBlock[1] = devNonce[0];
-    cryptoBlock[2] = devNonce[1];
-
-    for (i = 0U; i < JOIN_ACCEPT_ENC_LEN; i++)
-    {
-        plain[i] = packet[2U + i];
-    }
-    Xtea_CtrWithLoadedKey(cryptoBlock, plain, JOIN_ACCEPT_ENC_LEN);
-
-    candidateAddr = plain[0];
-    if ((candidateAddr == 0x00U) || (candidateAddr == 0xFFU))
-    {
-        /* Hub-ul aloca doar 0x01..0xFE. */
-        return 0U;
-    }
-
-    /* MIC peste 0x11 | DevEUI(8) | DevNonce(2) | DevAddr(1) | JoinNonce(3). */
-    micInput[0] = MSG_TYPE_JOIN_ACCEPT;
-    for (i = 0U; i < DEV_EUI_LEN; i++)
-    {
-        micInput[1U + i] = devEui[i];
-    }
-    micInput[9]  = devNonce[0];
-    micInput[10] = devNonce[1];
-    micInput[11] = candidateAddr;
-    micInput[12] = plain[1];
-    micInput[13] = plain[2];
-    micInput[14] = plain[3];
-
-    Xtea_MacWithLoadedKey(micInput, JOIN_ACCEPT_MIC_INPUT_LEN, macBuffer);
-
-    if (Mic_Matches(&packet[JOIN_ACCEPT_ENC_LEN + 2U], macBuffer) == 0U)
-    {
-        return 0U;
-    }
-
-    devAddr      = candidateAddr;
-    joinNonce[0] = plain[1];
-    joinNonce[1] = plain[2];
-    joinNonce[2] = plain[3];
-
-    return 1U;
-}
-
-/*
- * DATA_ENC: 17 octeti. Payload-ul este pachetul de temperatura de 6
- * octeti, criptat cu XTEA-CTR (sau lasat in clar daca
- * PAIRING_ENCRYPT_PAYLOAD este 0), iar totul este semnat cu SessKey.
- */
-static void Packet_BuildDataEnc(const uint8_t *tempPacket, uint32_t counter)
+static void Packet_BuildDataUp(const uint8_t *tempPacket, uint32_t counter)
 {
     Word32  packed;
     uint8_t i;
@@ -2083,7 +1668,7 @@ static void Packet_BuildDataEnc(const uint8_t *tempPacket, uint32_t counter)
     packed.word = counter;
 
     txBuffer[0] = LORA_PACKET_MAGIC;
-    txBuffer[1] = MSG_TYPE_DATA_ENC;
+    txBuffer[1] = MSG_TYPE_DATA_UP;
     txBuffer[2] = devAddr;
     txBuffer[3] = packed.byte[3];       /* FrameCounter big-endian */
     txBuffer[4] = packed.byte[2];
@@ -2094,52 +1679,6 @@ static void Packet_BuildDataEnc(const uint8_t *tempPacket, uint32_t counter)
     {
         txBuffer[7U + i] = tempPacket[i];
     }
-
-    Key_UseSession();
-
-#if PAIRING_ENCRYPT_PAYLOAD
-    /* IV = DevAddr(1) | FrameCounter(4) | 0x00 (uplink) | zero(2).
-     * Are exact 8 octeti, cat blocul cifrului. */
-    cryptoBlock[0] = devAddr;
-    cryptoBlock[1] = txBuffer[3];
-    cryptoBlock[2] = txBuffer[4];
-    cryptoBlock[3] = txBuffer[5];
-    cryptoBlock[4] = txBuffer[6];
-    cryptoBlock[5] = 0x00U;
-    cryptoBlock[6] = 0x00U;
-    cryptoBlock[7] = 0x00U;
-
-    Xtea_CtrWithLoadedKey(cryptoBlock, &txBuffer[7], LORA_PACKET_LEN);
-#endif
-
-    Xtea_MacWithLoadedKey(txBuffer, DATA_ENC_MIC_INPUT_LEN, macBuffer);
-
-    for (i = 0U; i < MIC_LEN; i++)
-    {
-        txBuffer[DATA_ENC_MIC_INPUT_LEN + i] = macBuffer[i];
-    }
-}
-
-/*
- * Verifica un CMD_DOWN si intoarce tipul comenzii, sau 0 daca pachetul
- * nu este pentru noi / nu este autentic.
- */
-static uint8_t Packet_ParseCommand(const uint8_t *packet, uint8_t length)
-{
-    if (length != CMD_DOWN_LEN)             return 0U;
-    if (packet[0] != LORA_PACKET_MAGIC)     return 0U;
-    if (packet[1] != MSG_TYPE_CMD_DOWN)     return 0U;
-    if (packet[2] != devAddr)               return 0U;
-
-    Key_UseSession();
-    Xtea_MacWithLoadedKey(packet, CMD_DOWN_MIC_INPUT_LEN, macBuffer);
-
-    if (Mic_Matches(&packet[CMD_DOWN_MIC_INPUT_LEN], macBuffer) == 0U)
-    {
-        return 0U;
-    }
-
-    return packet[7];
 }
 
 /* =====================================================================
@@ -2229,10 +1768,10 @@ static void Wait_PairingBlink(uint16_t milliseconds)
  * Generator pseudo-aleator de un octet: LFSR Galois cu polinomul
  * x^8 + x^6 + x^5 + x^4 + 1 (masca 0xB8), perioada 255.
  *
- * Nu are nicio pretentie criptografica si nu are voie sa capete una:
- * DevNonce-ul de la inrolare se face in continuare din zgomotul ADC
- * (Nonce_Generate), fiindca acolo repetarea unei valori chiar
- * inseamna ceva. Aici scopul este strict sa imprastie momentul
+ * Nu are nicio pretentie criptografica si nu are voie sa capete una -
+ * cu atat mai putin acum, cand nu mai exista nimic criptografic in
+ * firmware caruia sa i se para o sursa de entropie. Scopul este strict
+ * sa imprastie momentul
  * transmisiei intre cei 5 senzori, si pentru asta o secventa
  * previzibila dar DIFERITA de la placa la placa este exact ce trebuie.
  *
@@ -2352,15 +1891,26 @@ static uint8_t Sleep_Cycle(void)
  * ================================================================== */
 
 /*
- * O singura incercare de join: DevNonce nou -> JOIN_REQ -> RX ->
- * JOIN_ACCEPT. La succes deriva SessKey, o salveaza in HEF impreuna cu
- * DevAddr si intoarce 1.
+ * O singura incercare de join: JOIN_REQ -> RX -> JOIN_ACCEPT. La succes
+ * scrie inrolarea in HEF si intoarce 1.
+ *
+ * Nu mai exista nici nonce, nici derivare de cheie. Toata verificarea
+ * raspunsului - magic, tip, lungime si adresa - se face in LoRa_Receive,
+ * inca dinainte de inchiderea ferestrei, deci aici nu mai ramane nimic
+ * de parsat: rxBuffer[2] este numarul confirmat de hub.
+ *
+ * Filtrul pe adresa din LoRa_Receive foloseste devAddr, care in starea
+ * JOINING valoreaza SENSOR_NODE_ID. Asta face din fereastra de join si o
+ * VERIFICARE INCRUCISATA: daca placa a fost programata cu un numar care
+ * nu corespunde pozitiei ei din PROVISIONED_DEVICES_INIT, hub-ul
+ * raspunde cu alta adresa, pachetul este aruncat, incercarea esueaza si
+ * LED2 da trei clipiri. Este diagnosticul care inlocuieste sirul de "MIC
+ * gresit" de dinainte (F-037).
  */
 static uint8_t Join_Attempt(void)
 {
     uint8_t length = 0U;
 
-    Nonce_Generate();
     Packet_BuildJoinRequest();
 
     LED2_LAT = 1;                       /* LED2 aprins = incercam sa ne inrolam */
@@ -2371,31 +1921,21 @@ static uint8_t Join_Attempt(void)
         return 0U;
     }
 
-    /* Fereastra de receptie pentru JOIN_ACCEPT. Filtrul pe tip arunca
-     * JOIN_REQ-urile altor senzori care se inroleaza in aceeasi
-     * fereastra a hub-ului; un JOIN_ACCEPT adresat altcuiva nu poate fi
-     * filtrat aici, fiindca DevAddr circula cifrat, dar pica la MIC in
-     * Packet_ParseJoinAccept. */
     if (LoRa_Receive(rxBuffer, LORA_RX_BUFFER_LEN, &length,
-                     JOIN_RX_TIMEOUT_MS, MSG_TYPE_JOIN_ACCEPT) == 0U)
+                     JOIN_RX_TIMEOUT_MS,
+                     MSG_TYPE_JOIN_ACCEPT, JOIN_ACCEPT_LEN) == 0U)
     {
         LED2_LAT = 0;
         return 0U;
     }
 
-    if (Packet_ParseJoinAccept(rxBuffer, length) == 0U)
-    {
-        LED2_LAT = 0;
-        return 0U;
-    }
+    devAddr = rxBuffer[2];
 
-    Session_DeriveKey();
-
-    /* Sesiune noua inseamna si counter de la zero: hub-ul reseteaza
+    /* Inrolare noua inseamna si counter de la zero: hub-ul reseteaza
      * lastFrameCounterUp la inrolare, deci cele doua capete pornesc de
      * la aceeasi valoare. */
     frameCounter = 0UL;
-    fcntSinceCheckpoint = 0UL;
+    fcntSinceCheckpoint = 0U;
 
     Nvm_SaveSession();
     Nvm_SaveFrameCounter(frameCounter);
@@ -2581,12 +2121,12 @@ int main(void)
                                 (forcedByButton != 0U) ? REASON_BUTTON
                                                        : REASON_INTERVAL);
 
-        /* --- Transmisia criptata ------------------------------------ */
+        /* --- Transmisia --------------------------------------------- */
         if (loraReady != 0U)
         {
-            Packet_BuildDataEnc(tempPacket, frameCounter);
+            Packet_BuildDataUp(tempPacket, frameCounter);
 
-            if (LoRa_SendBuffer(txBuffer, DATA_ENC_LEN) != 0U)
+            if (LoRa_SendBuffer(txBuffer, DATA_UP_LEN) != 0U)
             {
                 /* LED1 se aprinde acum si se stinge dupa fereastra de
                  * downlink. Aici NU are voie sa stea un puls blocant:
@@ -2601,13 +2141,16 @@ int main(void)
                  * deci fereastra poate fi scurta. */
                 rxLength = 0U;
                 if (LoRa_Receive(rxBuffer, LORA_RX_BUFFER_LEN, &rxLength,
-                                 DOWNLINK_WINDOW_MS, MSG_TYPE_CMD_DOWN) != 0U)
+                                 DOWNLINK_WINDOW_MS,
+                                 MSG_TYPE_CMD_DOWN, CMD_DOWN_LEN) != 0U)
                 {
-                    command = Packet_ParseCommand(rxBuffer, rxLength);
+                    /* LoRa_Receive a validat deja magic, tip, lungime si
+                     * adresa, deci ce ramane este chiar comanda. */
+                    command = rxBuffer[3];
 
                     if (command == CMD_TYPE_RESET)
                     {
-                        /* Hub-ul ne-a scos din retea: stergem sesiunea si
+                        /* Hub-ul ne-a scos din retea: stergem inrolarea si
                          * ne intoarcem in REPAUS, nu direct in pairing.
                          * O dezinrolare este o decizie a hub-ului;
                          * reintrarea in retea ramane o decizie a
@@ -2628,7 +2171,7 @@ int main(void)
                     }
                     else
                     {
-                        /* Pachet strain sau MIC gresit: ignorat. */
+                        /* Comanda necunoscuta: ignorata. */
                     }
                 }
 

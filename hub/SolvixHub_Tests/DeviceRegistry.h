@@ -2,7 +2,7 @@
   DeviceRegistry.h - registrul senzorilor inrolati.
   ---------------------------------------------------------------------
   Tine minte, PESTE REPORNIRI ale hub-ului, ce senzori au trecut prin
-  pairing si cu ce cheie de sesiune. Fara asta, orice pana de curent ar
+  pairing si ce numar are fiecare. Fara asta, orice pana de curent ar
   obliga toate placile din teren sa se re-inroleze - iar ele nu pot,
   fiindca hub-ul accepta JOIN_REQ doar in modul pairing.
 
@@ -19,7 +19,7 @@
   atat timp cat senzorul nu isi reia niciodata contorul de la zero (si nu
   si-l reia: la cold boot sare inainte, vezi senzor/main.c, sectiunea 16).
 
-  LISTA DE PROVISIONING (DevEUI -> AppKey) NU este acelasi lucru cu
+  LISTA DE PROVISIONING (DevEUI-urile admise) NU este acelasi lucru cu
   registrul: ea spune CINE ARE VOIE sa se inroleze si sta in Config.h,
   compilata in program. Registrul spune CINE S-A INROLAT DEJA si traieste
   in NVS.
@@ -30,7 +30,7 @@
   Reteaua are pana la HUB_MAX_SENSORS placi, iar fiecare are un NUMAR
   stabil, 1..HUB_MAX_SENSORS. Numarul NU este o eticheta pusa pe deasupra:
   este chiar DevAddr-ul din protocol, adica octetul [2] al fiecarui
-  DATA_ENC si al fiecarui CMD_DOWN.
+  DATA_UP si al fiecarui CMD_DOWN.
 
   Numarul vine din POZITIA senzorului in tabelul PROVISIONED_DEVICES_INIT
   din Config.h, nu din ordinea inrolarii (addressForEui). Asta inseamna:
@@ -42,8 +42,8 @@
     - operatorul poate scrie "3" pe cutie si numarul ramane adevarat.
 
   Acelasi numar il stie si placa: este SENSOR_NODE_ID din senzor/main.c,
-  din care ies acolo DevEUI, AppKey si slotul de somn care o desincro-
-  nizeaza de celelalte. Randul N din tabel <-> placa cu SENSOR_NODE_ID N.
+  din care ies acolo DevEUI si slotul de somn care o desincronizeaza de
+  celelalte. Randul N din tabel <-> placa cu SENSOR_NODE_ID N.
 */
 
 #ifndef DEVICE_REGISTRY_H
@@ -57,7 +57,6 @@
 // (PROVISIONED_DEVICES_INIT); aici este doar forma lor.
 struct ProvisionedDevice {
   uint8_t devEui[DEV_EUI_LEN];
-  uint8_t appKey[CRYPTO_KEY_LEN];
 };
 
 // Un senzor inrolat. Structura este salvata ca atare in NVS, deci orice
@@ -71,7 +70,6 @@ struct DeviceRecord {
   // este stabil peste reinrolari si peste golirea registrului.
   uint8_t  devAddr;
 
-  uint8_t  sessKey[CRYPTO_KEY_LEN];
 
   // Ultimul frame counter acceptat de la senzor. Un pachet cu o valoare
   // mai mica sau egala este un replay si se arunca.
@@ -84,9 +82,6 @@ struct DeviceRecord {
   // Contorul pachetelor de downlink trimise catre senzor (ACK / RESET).
   uint32_t downCounter;
 
-  // Ultimul DevNonce folosit intr-un JOIN_REQ acceptat. Un JOIN_REQ care
-  // repeta acest nonce este un replay si se refuza.
-  uint16_t lastDevNonce;
 
   // Cate pachete de date valide au venit de la acest senzor.
   uint32_t packets;
@@ -150,9 +145,14 @@ namespace DeviceRegistry {
   DeviceRecord* findByEui(const uint8_t* devEui);
   DeviceRecord* findByAddr(uint8_t devAddr);
 
-  // AppKey-ul unui DevEUI din lista de provisioning din Config.h, sau
-  // nullptr daca senzorul nu are voie sa se inroleze deloc.
-  const uint8_t* findAppKey(const uint8_t* devEui);
+  // true daca DevEUI-ul apare in lista de provisioning din Config.h,
+  // adica senzorul are voie sa se inroleze.
+  //
+  // NU se inlocuieste cu "addressForEui() != 0": acela intoarce 0 si
+  // pentru "nu e in tabel", si pentru "pozitia depaseste
+  // HUB_MAX_SENSORS", iar handleJoinRequest are mesaje diferite pentru
+  // cele doua cazuri.
+  bool isProvisioned(const uint8_t* devEui);
 
   // Cate randuri are lista de provisioning din Config.h.
   uint8_t provisionedCount();
@@ -174,8 +174,7 @@ namespace DeviceRegistry {
   // Adauga sau inlocuieste inregistrarea unui senzor. Intoarce pointerul
   // catre inregistrarea din registru, sau nullptr daca nu mai este loc.
   // Salveaza imediat in NVS.
-  DeviceRecord* add(const uint8_t* devEui, uint8_t devAddr,
-                    const uint8_t* sessKey, uint16_t devNonce);
+  DeviceRecord* add(const uint8_t* devEui, uint8_t devAddr);
 
   // Scoate un device din registru si salveaza. Intoarce false daca nu a
   // fost gasit.

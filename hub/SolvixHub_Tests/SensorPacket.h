@@ -5,9 +5,28 @@
   Orice modificare aici trebuie facuta si acolo, in acelasi commit
   (regula 10 din CLAUDE.md).
 
+  !!! RETEAUA NU ESTE AUTENTIFICATA !!!
+  ---------------------------------------------------------------------
+  Criptografia (XTEA-128 + CBC-MAC + CTR) a fost scoasa din proiect: nu
+  mai incapea in PIC16LF1508, unde ocupa ~1300 din cele 3968 de cuvinte
+  utilizabile. Este o masura TEMPORARA, pana la un microcontroller cu mai
+  multa memorie. Ultima versiune care o contine este commit-ul a710142.
+
+  Nu mai exista MIC, cheie sau nonce. Prin urmare oricine are un radio
+  LoRa cu aceiasi parametri poate injecta o temperatura falsa pentru
+  orice senzor, poate dezinrola orice placa cu patru octeti, si poate
+  rejuca orice pachet capturat. Inrolarea de mai jos este o COMISIONARE -
+  cine e in retea, ce numar are, de unde incep contoarele - NU un control
+  de acces. Nu pune sistemul in exploatare in aceasta forma.
+
   Toate campurile multi-octet sunt big-endian. Primul octet ramane
-  magic-ul 0xA5 din protocolul initial; ce s-a schimbat odata cu
-  pairing-ul este ca octetul TYPE are acum mai multe valori.
+  magic-ul 0xA5 din protocolul initial.
+
+  CELE CINCI LUNGIMI SUNT DISTINCTE - 6 / 10 / 3 / 13 / 4. De cand nu mai
+  exista MIC, perechea tip+lungime este singura verificare impotriva unei
+  desincronizari intre capete: fara ea, un pachet de format vechi ar fi
+  citit la offset-uri gresite si ar da o temperatura plauzibila si
+  gresita, in tacere. Nu egala doua lungimi.
 
   ---------------------------------------------------------------------
   0x01 - TEMP_PLAIN, pachetul initial de 6 octeti (NESCHIMBAT)
@@ -19,61 +38,54 @@
     [4] REASON    = 0x00 la interval periodic, 0x01 la apasare de buton
     [5] CHECKSUM  = (b0 ^ b1 ^ b2 ^ b3 ^ b4) ^ 0x5A
 
-  Acesta este si payload-ul care circula criptat in DATA_ENC: dupa
-  decriptare se da neschimbat lui decode(), deci nu exista doua cai
-  diferite de interpretare a temperaturii.
+  Acesta este si payload-ul transportat de DATA_UP: se da neschimbat lui
+  decode(), deci nu exista doua cai diferite de interpretare a
+  temperaturii, iar testul 7 si testul 8 folosesc acelasi cod.
 
   ---------------------------------------------------------------------
-  CIFRUL: XTEA-128, bloc de 8 octeti (vezi HubCrypto.h si F-024).
-  MIC = primii 4 octeti din CBC-MAC-XTEA.
+  0x10 - JOIN_REQ (senzor -> hub), 10 octeti
   ---------------------------------------------------------------------
+    [0] 0xA5  [1] 0x10  [2..9] DevEUI
+
+  DevEUI ramane pe fir desi hub-ul stie oricum ce numere exista: el este
+  cheia dupa care hub-ul verifica ca placa are voie, deriva numarul din
+  POZITIA in tabelul de provisioning (F-037) si o identifica in comanda
+  `remove <DevEUI>`. Daca JOIN_REQ ar purta doar numarul, senzorul si-ar
+  declara singur adresa - exact ce a reparat F-037.
 
   ---------------------------------------------------------------------
-  0x10 - JOIN_REQ (senzor -> hub), 16 octeti
+  0x11 - JOIN_ACCEPT (hub -> senzor), 3 octeti
   ---------------------------------------------------------------------
-    [0] 0xA5  [1] 0x10  [2..9] DevEUI  [10..11] DevNonce
-    [12..15] MIC = MAC(AppKey, bytes[0..11])
+    [0] 0xA5  [1] 0x11  [2] DevAddr
+
+  DevAddr circula acum in clar si aici, ceea ce inchide ce F-035 lasase
+  netratat: senzorul poate filtra fereastra de join pe adresa, fiindca
+  stie de la compilare ce numar asteapta (SENSOR_NODE_ID). Doi senzori
+  care se inroleaza in aceeasi secunda nu isi mai fura fereastra. Ca
+  efect secundar, o placa programata cu un numar care nu corespunde
+  pozitiei ei din tabel isi refuza singura JOIN_ACCEPT-ul - diagnosticul
+  care inlocuieste sirul de "MIC gresit" de dinainte.
 
   ---------------------------------------------------------------------
-  0x11 - JOIN_ACCEPT (hub -> senzor), 10 octeti
-  ---------------------------------------------------------------------
-    IV_join (8B) = 0x11 | DevNonce(2) | zero(5)
-    [0] 0xA5  [1] 0x11
-    [2..5] Enc = XTEA-CTR(AppKey, IV_join, DevAddr(1) | JoinNonce(3))
-    [6..9] MIC = MAC(AppKey,
-                     0x11 | DevEUI(8) | DevNonce(2) | DevAddr(1) | JoinNonce(3))
-
-  CTR este simetric, deci senzorul nu are nevoie de cod de descifrare -
-  exact ce trebuia ca sa incapa in cei 4096 de cuvinte ai lui
-  PIC16LF1508. IV-ul depinde de DevNonce, care e nou la fiecare
-  incercare, deci un JOIN_ACCEPT rejucat se descifreaza in gunoi SI pica
-  la MIC.
-
-  Cheia de sesiune se deriva la fel pe ambele capete. MAC-ul da 8 octeti,
-  cheia are 16, deci se cheama de doua ori peste acelasi bloc:
-    B = <prefix> | DevNonce(2) | JoinNonce(3) | DevAddr(1) | 0x00
-    SessKey[0..7]  = MAC(AppKey, B cu prefix 0x01)
-    SessKey[8..15] = MAC(AppKey, B cu prefix 0x02)
-
-  ---------------------------------------------------------------------
-  0x12 - DATA_ENC (senzor -> hub), 17 octeti
+  0x12 - DATA_UP (senzor -> hub), 13 octeti
   ---------------------------------------------------------------------
     [0] 0xA5  [1] 0x12  [2] DevAddr  [3..6] FrameCounter
-    [7..12] EncPayload = XTEA-CTR(SessKey, IV, pachetul TEMP de 6 octeti)
-            IV (8B) = DevAddr(1) | FrameCounter(4) | 0x00 (uplink) | zero(2)
-    [13..16] MIC = MAC(SessKey, bytes[0..12])
+    [7..12] pachetul TEMP de 6 octeti, IN CLAR
+
+  Numele nu mai este DATA_ENC: nu mai exista niciun "Enc". Valoarea
+  tipului ramane 0x12 - un pachet de firmware vechi are 17 octeti si cade
+  la verificarea de lungime, ceea ce este exact simptomul util.
 
   DevAddr DIN OCTETUL [2] ESTE NUMARUL SENZORULUI, si el este singurul
   raspuns de care are nevoie intrebarea "de la cine vine data" cand pe
-  canal sunt mai multe placi. Circula in clar - hub-ul trebuie sa il
-  citeasca INAINTE de a sti ce cheie sa foloseasca - dar intra in zona
-  acoperita de MIC, iar MIC-ul se calculeaza cu cheia de sesiune a acelui
-  senzor. O adresa modificata pe drum, sau un senzor care ar minti in
-  privinta ei, dau un MIC care nu se verifica cu nicio cheie din registru.
-  Deci: identificarea este in clar, dar nu este falsificabila.
+  canal sunt mai multe placi. ATENTIE: raspunsul acela a devenit
+  DECLARATIV. Cat timp exista MIC, adresa intra in zona semnata cu cheia
+  de sesiune a acelui senzor, deci nu putea fi falsificata. Acum orice
+  emitator poate pretinde orice numar.
 
-  DevAddr intra si in IV-ul CTR, deci doi senzori cu acelasi frame
-  counter nu produc niciodata acelasi flux de chei.
+  FrameCounter-ul ramane si devine singura aparare a caii de date: hub-ul
+  cere strict crescator. Tot el da pachetele pierdute si detectia de
+  repornire (F-036).
 
   Un pachet suprapus peste altul in aer se pierde de tot - nu ajunge la
   hub in nicio forma - deci nu exista cazul "date amestecate intre
@@ -81,18 +93,21 @@
   deloc si se vede ca un gol in frame counter.
 
   ---------------------------------------------------------------------
-  0x13 - CMD_DOWN (hub -> senzor), 12 octeti
+  0x13 - CMD_DOWN (hub -> senzor), 4 octeti
   ---------------------------------------------------------------------
-    [0] 0xA5  [1] 0x13  [2] DevAddr  [3..6] FrameCounter downlink
-    [7] CmdType (0x01 = ACK, 0x02 = RESET / dezinrolare)
-    [8..11] MIC = MAC(SessKey, bytes[0..7])
+    [0] 0xA5  [1] 0x13  [2] DevAddr  [3] CmdType (0x01 ACK, 0x02 RESET)
+
+  Contorul downlink a fost scos de pe fir. Fara MIC nu apara nimic - un
+  atacator nu are nevoie sa REIA un CMD_DOWN capturat, il fabrica din
+  patru octeti - iar senzorul nu l-a citit niciodata. downCounter ramane
+  in DeviceRecord ca statistica locala, vizibila in jurnal.
 
   ---------------------------------------------------------------------
-  De ce se pastreaza checksum-ul XOR in interiorul payload-ului criptat,
-  cand MIC-ul acopera deja tot pachetul: pentru ca pachetul de 6 octeti
-  sa ramana BIT CU BIT cel vechi. Asa hub-ul il poate da direct lui
-  decode(), fara nicio logica noua de parsare a temperaturii, iar testul
-  7 (temperatura in clar) si testul 8 (pairing) folosesc acelasi cod.
+  De ce se pastreaza checksum-ul XOR in interiorul celor 6 octeti: ca
+  pachetul de temperatura sa ramana BIT CU BIT cel vechi si sa poata fi
+  dat direct lui decode(). NU este apararea de integritate a pachetului -
+  aceea este CRC-ul LoRa, activ pe ambele capete, care acopera TOT
+  payload-ul, inclusiv adresa si contorul.
 */
 
 #ifndef SENSOR_PACKET_H
@@ -108,32 +123,23 @@
 #define SENSOR_MSG_TEMPERATURE  0x01   // TEMP_PLAIN
 #define SENSOR_MSG_JOIN_REQ     0x10
 #define SENSOR_MSG_JOIN_ACCEPT  0x11
-#define SENSOR_MSG_DATA_ENC     0x12
+#define SENSOR_MSG_DATA_UP      0x12
 #define SENSOR_MSG_CMD_DOWN     0x13
 
 // Lungimile fixe ale fiecarui tip.
-#define JOIN_REQ_LEN            16
-#define JOIN_ACCEPT_LEN         10
-#define DATA_ENC_LEN            17
-#define CMD_DOWN_LEN            12
+//
+// CELE CINCI LUNGIMI SUNT DISTINCTE - 6 / 10 / 3 / 13 / 4 - si trebuie
+// sa ramana asa. De cand nu mai exista MIC, perechea tip+lungime este
+// SINGURA verificare impotriva unei desincronizari intre cele doua
+// capete: un pachet de format vechi este respins de messageType(), in
+// loc sa fie citit la offset-uri gresite si sa scoata o temperatura
+// plauzibila si gresita, in tacere. Nu egala doua lungimi.
+#define JOIN_REQ_LEN            10
+#define JOIN_ACCEPT_LEN         3
+#define DATA_UP_LEN             13
+#define CMD_DOWN_LEN            4
 
-// Zonele acoperite de MIC, in octeti. Aceleasi numere apar in
-// senzor/main.c, sectiunea 4 - se schimba IMPREUNA.
-#define JOIN_REQ_MIC_INPUT_LEN      12
-#define JOIN_ACCEPT_MIC_INPUT_LEN   15
-#define DATA_ENC_MIC_INPUT_LEN      13
-#define CMD_DOWN_MIC_INPUT_LEN      8
-
-// Campul cifrat din JOIN_ACCEPT: DevAddr(1) + JoinNonce(3).
-#define JOIN_ACCEPT_ENC_LEN     4
-
-// Dimensiuni comune. Blocul cifrului are 8 octeti (XTEA), cheia 16.
-#define MIC_LEN                 4
-#define XTEA_BLOCK_LEN          8
-#define CRYPTO_KEY_LEN          16
 #define DEV_EUI_LEN             8
-#define DEV_NONCE_LEN           2
-#define JOIN_NONCE_LEN          3
 
 // Comenzile de downlink.
 #define CMD_TYPE_ACK            0x01
@@ -168,19 +174,16 @@ struct SensorPacket {
 
 // Campurile utile ale unui JOIN_REQ, dupa despachetare.
 struct JoinRequest {
-  uint8_t  devEui[DEV_EUI_LEN];
-  uint16_t devNonce;
-  const uint8_t* mic;   // pointer in bufferul primit, 4 octeti
+  uint8_t devEui[DEV_EUI_LEN];
 };
 
-// Campurile utile ale unui DATA_ENC, dupa despachetare. Payload-ul NU
-// este inca decriptat aici: decriptarea are nevoie de cheia de sesiune,
-// care se afla din registru dupa ce se stie DevAddr.
-struct EncryptedData {
+// Campurile utile ale unui DATA_UP, dupa despachetare. Payload-ul este
+// pachetul de temperatura de 6 octeti, in clar, bit cu bit cel vechi:
+// se da neschimbat lui decode().
+struct SensorData {
   uint8_t  devAddr;
   uint32_t frameCounter;
-  const uint8_t* payload;   // 6 octeti, inca cifrati
-  const uint8_t* mic;       // 4 octeti
+  const uint8_t* payload;   // 6 octeti, in clar
 };
 
 namespace SensorPacketCodec {
@@ -206,29 +209,17 @@ namespace SensorPacketCodec {
   // nu este niciunul dintre ale noastre.
   uint8_t messageType(const uint8_t* buffer, int length);
 
-  // Despacheteaza un JOIN_REQ. NU verifica MIC-ul: acela cere AppKey,
-  // deci se face dupa ce DevEUI a fost cautat in lista de provisioning.
+  // Despacheteaza un JOIN_REQ.
   bool parseJoinRequest(const uint8_t* buffer, int length, JoinRequest& out);
 
-  // Despacheteaza un DATA_ENC. Nici acesta nu verifica MIC-ul, din
-  // acelasi motiv: cheia se afla abia dupa ce se stie DevAddr.
-  bool parseEncryptedData(const uint8_t* buffer, int length, EncryptedData& out);
+  // Despacheteaza un DATA_UP.
+  bool parseData(const uint8_t* buffer, int length, SensorData& out);
 
   // Construieste JOIN_ACCEPT in "out" (JOIN_ACCEPT_LEN octeti).
-  // Cifreaza blocul P cu AppKey si calculeaza MIC-ul.
-  void buildJoinAccept(uint8_t* out,
-                       const uint8_t* appKey,
-                       const uint8_t* devEui,
-                       uint16_t devNonce,
-                       uint8_t devAddr,
-                       const uint8_t* joinNonce);
+  void buildJoinAccept(uint8_t* out, uint8_t devAddr);
 
   // Construieste CMD_DOWN in "out" (CMD_DOWN_LEN octeti).
-  void buildCommand(uint8_t* out,
-                    const uint8_t* sessKey,
-                    uint8_t devAddr,
-                    uint32_t downCounter,
-                    uint8_t commandType);
+  void buildCommand(uint8_t* out, uint8_t devAddr, uint8_t commandType);
 
   // Afiseaza un DevEUI ca 8 octeti hexazecimali lipiti, fara sfarsit de
   // linie. Aceeasi forma este acceptata de comanda `remove`.

@@ -23,6 +23,12 @@ namespace DeviceRegistry {
   // in loc sa fie interpretat gresit octet cu octet.
   // v2: DeviceRecord a primit resetAttempts si resetSentMs, pentru
   //     dezinrolarea confirmata din F-031.
+  // v4: DeviceRecord a pierdut sessKey (16 octeti) si lastDevNonce (2),
+  //     odata cu scoaterea criptografiei. Blob-ul si-a schimbat deci
+  //     dimensiunea. Aici PRETUL obisnuit nu se plateste: senzorii
+  //     pornesc si ei goli, fiindca HEF_MAGIC_SESSION s-a schimbat in
+  //     acelasi commit, deci ambele capete sunt goale simultan si
+  //     recuperarea este cea normala - `pair` plus butonul 2.
   // v3: DeviceRecord a primit lostPackets, lastTempX100, lastRssi,
   //     hasReading si offlineReported, pentru vederea pe mai multi
   //     senzori (tabelul `sensors` si contorul de pachete pierdute).
@@ -30,7 +36,7 @@ namespace DeviceRegistry {
   //     registrul porneste gol, iar senzorii deja inrolati continua sa
   //     emita cu sesiunile din HEF si apar ca "DevAddr ... nu este
   //     inrolat". Fiecare trebuie reinrolat o data, manual.
-  static const uint8_t REGISTRY_BLOB_VERSION = 3;
+  static const uint8_t REGISTRY_BLOB_VERSION = 4;
 
   static const char* KEY_VERSION = "ver";
   static const char* KEY_COUNT   = "count";
@@ -76,13 +82,13 @@ namespace DeviceRegistry {
     return nullptr;
   }
 
-  const uint8_t* findAppKey(const uint8_t* devEui) {
+  bool isProvisioned(const uint8_t* devEui) {
     for (uint8_t i = 0; i < PROVISIONED_COUNT; i++) {
       if (sameEui(PROVISIONED_DEVICES[i].devEui, devEui)) {
-        return PROVISIONED_DEVICES[i].appKey;
+        return true;
       }
     }
-    return nullptr;
+    return false;
   }
 
   uint8_t provisionedCount() { return PROVISIONED_COUNT; }
@@ -105,8 +111,7 @@ namespace DeviceRegistry {
     return 0;
   }
 
-  DeviceRecord* add(const uint8_t* devEui, uint8_t devAddr,
-                    const uint8_t* sessKey, uint16_t devNonce) {
+  DeviceRecord* add(const uint8_t* devEui, uint8_t devAddr) {
     DeviceRecord* record = findByEui(devEui);
 
     if (record == nullptr) {
@@ -120,11 +125,9 @@ namespace DeviceRegistry {
     // O re-inrolare inseamna sesiune noua: contoarele o iau de la capat,
     // exact ca pe senzor, care isi pune frameCounter pe 0 dupa join.
     record->devAddr = devAddr;
-    memcpy(record->sessKey, sessKey, CRYPTO_KEY_LEN);
     record->lastFrameCounterUp = 0;
     record->hasUplink = false;
     record->downCounter = 0;
-    record->lastDevNonce = devNonce;
     record->packets = 0;
     record->lostPackets = 0;
     record->pendingReset = false;

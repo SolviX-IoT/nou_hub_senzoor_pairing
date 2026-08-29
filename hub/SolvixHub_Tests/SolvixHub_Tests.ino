@@ -23,9 +23,10 @@
     si SENSOR_NODE_ID in senzor/main.c.
 
     Pachetele diferitilor senzori NU se amesteca: DevAddr calatoreste in
-    clar in fiecare DATA_ENC si este acoperit de MIC-ul calculat cu cheia
-    de sesiune a acelui senzor, deci un pachet ajuns la hub este
-    intotdeauna atribuit corect. Ca sa nu se ciocneasca in aer, fiecare
+    clar in fiecare DATA_UP, iar doua pachete suprapuse se pierd amandoua
+    pe radio, deci oricare AJUNGE ajunge intreg si atribuit corect. Ce nu
+    mai este garantat, de cand a fost scoasa criptografia, este ca
+    emitatorul chiar este senzorul al carui numar il poarta pachetul. Ca sa nu se ciocneasca in aer, fiecare
     senzor doarme un interval propriu (23..38 s, dupa numar) plus un
     jitter aleator la fiecare ciclu - vezi senzor/main.c, sectiunea 1.
 
@@ -77,7 +78,6 @@
     LoRaRadio.*         - invelis emisie/receptie peste libraria LoRa
     Leds.h/.cpp         - cele doua LED-uri, D22 si D21
     SensorPacket.*      - formatul TUTUROR pachetelor schimbate cu senzorul
-    HubCrypto.*         - XTEA-128, CBC-MAC si CTR (fara biblioteci)
     DeviceRegistry.*    - registrul senzorilor inrolati, salvat in NVS,
                           si numerotarea lor stabila 1..HUB_MAX_SENSORS
     TestButtons.*       - butoanele de pe GPIO34 / GPIO35
@@ -87,7 +87,7 @@
     TestLoRaRx.*        - receptie LoRa cu RSSI si SNR
     TestCoexistence.*   - ambele module active alternativ pe acelasi bus
     TestSensorRx.*      - temperatura primita in CLAR de la nodul senzor
-    TestPairing.*       - inrolare, date criptate, dezinrolare
+    TestPairing.*       - inrolare, receptia datelor, dezinrolare
 */
 
 #include "Config.h"
@@ -134,8 +134,8 @@ static const Test TESTS[] = {
     "Asculta nodul PIC16LF1508 neinrolat si afiseaza temperatura",
     TestSensorRx::begin,    TestSensorRx::tick,    TestSensorRx::stop },
 
-  { "Pairing criptat: inrolare + date",
-    "Inroleaza senzori, primeste temperatura criptata, sterge device-uri",
+  { "Pairing: inrolare + date",
+    "Inroleaza senzori, primeste temperatura, sterge device-uri",
     TestPairing::begin,     TestPairing::tick,     TestPairing::stop },
 };
 
@@ -338,12 +338,11 @@ static void commandRemove(const String& argument) {
     Serial.print(F(", DevEUI "));
     SensorPacketCodec::printEui(eui);
     Serial.println();
-    Serial.println(F("ATENTIE: senzorul NU a fost anuntat, deci pastreaza cheia de sesiune si va"));
-    Serial.println(F("continua sa emita. Hub-ul ii va vedea pachetele ca DATA_ENC de la o adresa"));
-    Serial.println(F("necunoscuta si NU mai are cu ce sa il opreasca: cheia tocmai a fost stearsa"));
-    Serial.println(F("de aici. Oprirea si repornirea alimentarii nu ajuta - cheia sta in HEF."));
-    Serial.println(F("Curatarea corecta: tine butonul 2 apasat trei secunde pe senzor (revine in"));
-    Serial.println(F("repaus si isi sterge sesiunea), sau, data viitoare, 'remove <DevEUI>' fara"));
+    Serial.println(F("ATENTIE: senzorul NU a fost anuntat, deci se crede in continuare inrolat"));
+    Serial.println(F("si va emite mai departe. Hub-ul ii va vedea pachetele ca DATA_UP de la o"));
+    Serial.println(F("adresa necunoscuta. Oprirea si repornirea alimentarii nu ajuta - starea"));
+    Serial.println(F("sta in HEF. Curatarea corecta: tine butonul 2 apasat trei secunde pe"));
+    Serial.println(F("senzor (revine in repaus), sau, data viitoare, 'remove <DevEUI>' fara"));
     Serial.println(F("'force' cat timp senzorul inca emite."));
     return;
   }

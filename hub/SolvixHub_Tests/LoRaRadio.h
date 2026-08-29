@@ -39,7 +39,7 @@ namespace LoRaRadio {
   bool sendText(const String& text);
 
   // Varianta binara a lui sendText(). Obligatorie pentru pachetele de
-  // pairing: JOIN_ACCEPT si CMD_DOWN contin octeti 0x00 (padding, MIC,
+  // pairing: JOIN_ACCEPT si CMD_DOWN pot contine octeti 0x00 (adresa,
   // contoare), iar String i-ar trata drept terminator de sir - exact
   // problema care a dus la receiveRaw() (F-019), acum si pe emisie.
   bool sendRaw(const uint8_t* data, uint8_t length);

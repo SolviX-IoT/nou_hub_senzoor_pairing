@@ -1,5 +1,4 @@
 #include "SensorPacket.h"
-#include "HubCrypto.h"
 
 namespace SensorPacketCodec {
 
@@ -76,8 +75,8 @@ namespace SensorPacketCodec {
         return (length == JOIN_REQ_LEN) ? SENSOR_MSG_JOIN_REQ : 0;
       case SENSOR_MSG_JOIN_ACCEPT:
         return (length == JOIN_ACCEPT_LEN) ? SENSOR_MSG_JOIN_ACCEPT : 0;
-      case SENSOR_MSG_DATA_ENC:
-        return (length == DATA_ENC_LEN) ? SENSOR_MSG_DATA_ENC : 0;
+      case SENSOR_MSG_DATA_UP:
+        return (length == DATA_UP_LEN) ? SENSOR_MSG_DATA_UP : 0;
       case SENSOR_MSG_CMD_DOWN:
         return (length == CMD_DOWN_LEN) ? SENSOR_MSG_CMD_DOWN : 0;
       default:
@@ -91,14 +90,12 @@ namespace SensorPacketCodec {
     for (int i = 0; i < DEV_EUI_LEN; i++) {
       out.devEui[i] = buffer[2 + i];
     }
-    out.devNonce = (uint16_t)(((uint16_t)buffer[10] << 8) | (uint16_t)buffer[11]);
-    out.mic = &buffer[12];
 
     return true;
   }
 
-  bool parseEncryptedData(const uint8_t* buffer, int length, EncryptedData& out) {
-    if (messageType(buffer, length) != SENSOR_MSG_DATA_ENC) return false;
+  bool parseData(const uint8_t* buffer, int length, SensorData& out) {
+    if (messageType(buffer, length) != SENSOR_MSG_DATA_UP) return false;
 
     out.devAddr = buffer[2];
     out.frameCounter = ((uint32_t)buffer[3] << 24) |
@@ -106,64 +103,21 @@ namespace SensorPacketCodec {
                        ((uint32_t)buffer[5] << 8)  |
                        ((uint32_t)buffer[6]);
     out.payload = &buffer[7];
-    out.mic     = &buffer[13];
 
     return true;
   }
 
-  void buildJoinAccept(uint8_t* out,
-                       const uint8_t* appKey,
-                       const uint8_t* devEui,
-                       uint16_t devNonce,
-                       uint8_t devAddr,
-                       const uint8_t* joinNonce) {
+  void buildJoinAccept(uint8_t* out, uint8_t devAddr) {
     out[0] = SENSOR_PACKET_MAGIC;
     out[1] = SENSOR_MSG_JOIN_ACCEPT;
-
-    // DevAddr + JoinNonce, cifrate cu XTEA-CTR. IV-ul contine DevNonce,
-    // deci fluxul de chei este altul la fiecare incercare de inrolare.
     out[2] = devAddr;
-    out[3] = joinNonce[0];
-    out[4] = joinNonce[1];
-    out[5] = joinNonce[2];
-
-    uint8_t iv[XTEA_BLOCK_LEN];
-    HubCrypto::buildJoinIv(iv, devNonce);
-    HubCrypto::ctr(appKey, iv, &out[2], JOIN_ACCEPT_ENC_LEN);
-
-    // MIC peste campurile in CLAR, cu 0x11 in fata pentru separarea de
-    // domeniu: senzorul il poate recalcula abia dupa ce a descifrat, deci
-    // el confirma si ca descifrarea a reusit.
-    uint8_t micInput[JOIN_ACCEPT_MIC_INPUT_LEN];
-    micInput[0] = SENSOR_MSG_JOIN_ACCEPT;
-    memcpy(&micInput[1], devEui, DEV_EUI_LEN);
-    micInput[9]  = (uint8_t)((devNonce >> 8) & 0xFF);
-    micInput[10] = (uint8_t)(devNonce & 0xFF);
-    micInput[11] = devAddr;
-    micInput[12] = joinNonce[0];
-    micInput[13] = joinNonce[1];
-    micInput[14] = joinNonce[2];
-
-    HubCrypto::macMic(appKey, micInput, sizeof(micInput),
-                      &out[2 + JOIN_ACCEPT_ENC_LEN]);
   }
 
-  void buildCommand(uint8_t* out,
-                    const uint8_t* sessKey,
-                    uint8_t devAddr,
-                    uint32_t downCounter,
-                    uint8_t commandType) {
+  void buildCommand(uint8_t* out, uint8_t devAddr, uint8_t commandType) {
     out[0] = SENSOR_PACKET_MAGIC;
     out[1] = SENSOR_MSG_CMD_DOWN;
     out[2] = devAddr;
-    out[3] = (uint8_t)((downCounter >> 24) & 0xFF);
-    out[4] = (uint8_t)((downCounter >> 16) & 0xFF);
-    out[5] = (uint8_t)((downCounter >> 8) & 0xFF);
-    out[6] = (uint8_t)(downCounter & 0xFF);
-    out[7] = commandType;
-
-    HubCrypto::macMic(sessKey, out, CMD_DOWN_MIC_INPUT_LEN,
-                      &out[CMD_DOWN_MIC_INPUT_LEN]);
+    out[3] = commandType;
   }
 
   void printEui(const uint8_t* devEui) {

@@ -1,20 +1,12 @@
 #include "TestPairing.h"
 
-// esp_random() este generatorul hardware al ESP32. In nucleele mai noi
-// (ESP-IDF 5) locuieste in esp_random.h; in cele vechi era expus prin
-// esp_system.h. Verificarea de mai jos merge in ambele cazuri.
-#if __has_include(<esp_random.h>)
-  #include <esp_random.h>
-#else
-  #include <esp_system.h>
-#endif
 
 namespace TestPairing {
 
   // Cat timp de liniste inainte de un mesaj de semn de viata.
   static const unsigned long HEARTBEAT_MS = 15000;
 
-  // Ceva mai mare decat cel mai lung pachet al protocolului (DATA_ENC,
+  // Ceva mai mare decat cel mai lung pachet al protocolului (DATA_UP,
   // 17 octeti), ca un pachet prea lung sa fie citit si aratat, nu taiat
   // in tacere.
   static const int RX_BUFFER_SIZE = 32;
@@ -169,7 +161,7 @@ namespace TestPairing {
 
   // Trimite un RESET catre un device marcat si porneste (sau reporneste)
   // ceasul de tacere. Apelantul a verificat deja ca device-ul este al
-  // nostru: MIC-ul pachetului care a declansat retrimiterea a trecut.
+  // nostru: pachetul care a declansat retrimiterea a venit de la adresa lui.
   static void sendRemovalReset(DeviceRecord& device);
 
   /*
@@ -256,8 +248,7 @@ namespace TestPairing {
 
   static void sendCommand(const DeviceRecord& device, uint8_t commandType) {
     uint8_t packet[CMD_DOWN_LEN];
-    SensorPacketCodec::buildCommand(packet, device.sessKey, device.devAddr,
-                                    device.downCounter, commandType);
+    SensorPacketCodec::buildCommand(packet, device.devAddr, commandType);
 
     LoRaRadio::sendRaw(packet, CMD_DOWN_LEN);
 
@@ -291,8 +282,6 @@ namespace TestPairing {
 
     Serial.print(F("[JOIN_REQ] DevEUI "));
     SensorPacketCodec::printEui(request.devEui);
-    Serial.print(F("  DevNonce 0x"));
-    Serial.print(request.devNonce, HEX);
     Serial.print(F("  RSSI "));
     Serial.print(rssi);
     Serial.print(F(" dBm  SNR "));
@@ -305,30 +294,19 @@ namespace TestPairing {
       return;
     }
 
-    // 1. Are voie senzorul asta sa se inroleze?
-    const uint8_t* appKey = DeviceRegistry::findAppKey(request.devEui);
-    if (appKey == nullptr) {
+    // 1. Are voie senzorul asta sa se inroleze? Este singura verificare
+    //    ramasa la inrolare: fara MIC, apartenenta la lista de
+    //    provisioning nu mai este DOVEDITA, ci doar declarata. Oricine
+    //    poate emite un JOIN_REQ cu un DevEUI din lista.
+    if (!DeviceRegistry::isProvisioned(request.devEui)) {
       s_joinsRejected++;
       Serial.println(F("      REFUZAT: DevEUI-ul nu este in lista de provisioning din Config.h."));
       return;
     }
 
-    // 2. Este cererea autentica? MIC-ul acopera primii 12 octeti.
-    if (!HubCrypto::macVerify(appKey, buffer, JOIN_REQ_MIC_INPUT_LEN, request.mic)) {
-      s_joinsRejected++;
-      Serial.println(F("      REFUZAT: MIC gresit - AppKey-ul de pe senzor nu se potriveste."));
-      return;
-    }
-
-    // 3. Nu este un JOIN_REQ rejucat?
     DeviceRecord* existing = DeviceRegistry::findByEui(request.devEui);
-    if (existing != nullptr && existing->lastDevNonce == request.devNonce) {
-      s_joinsRejected++;
-      Serial.println(F("      REFUZAT: DevNonce deja folosit (posibil replay)."));
-      return;
-    }
 
-    // 4. NUMARUL senzorului, care este si adresa lui. Nu se aloca "prima
+    // 2. NUMARUL senzorului, care este si adresa lui. Nu se aloca "prima
     //    libera": este pozitia in tabelul de provisioning din Config.h,
     //    plus unu. Asa aceeasi placa primeste acelasi numar la fiecare
     //    inrolare, indiferent de ordinea in care au fost pornite placile
@@ -358,31 +336,17 @@ namespace TestPairing {
       return;
     }
 
-    // 5. JoinNonce nou, din generatorul hardware al ESP32.
-    uint8_t joinNonce[JOIN_NONCE_LEN];
-    uint32_t entropy = esp_random();
-    joinNonce[0] = (uint8_t)((entropy >> 16) & 0xFF);
-    joinNonce[1] = (uint8_t)((entropy >> 8) & 0xFF);
-    joinNonce[2] = (uint8_t)(entropy & 0xFF);
-
-    // 6. Cheia de sesiune, derivata identic pe ambele capete.
-    uint8_t sessKey[CRYPTO_KEY_LEN];
-    HubCrypto::deriveSessionKey(appKey, request.devNonce, joinNonce,
-                                devAddr, sessKey);
-
-    DeviceRecord* record = DeviceRegistry::add(request.devEui, devAddr,
-                                               sessKey, request.devNonce);
+    DeviceRecord* record = DeviceRegistry::add(request.devEui, devAddr);
     if (record == nullptr) {
       s_joinsRejected++;
       Serial.println(F("      REFUZAT: registrul este plin."));
       return;
     }
 
-    // 7. Raspunsul. Senzorul asculta imediat dupa ce a emis, deci nu
+    // 3. Raspunsul. Senzorul asculta imediat dupa ce a emis, deci nu
     //    trebuie sa intarziem.
     uint8_t accept[JOIN_ACCEPT_LEN];
-    SensorPacketCodec::buildJoinAccept(accept, appKey, request.devEui,
-                                       request.devNonce, devAddr, joinNonce);
+    SensorPacketCodec::buildJoinAccept(accept, devAddr);
     LoRaRadio::sendRaw(accept, JOIN_ACCEPT_LEN);
 
     s_joinsAccepted++;
@@ -390,7 +354,7 @@ namespace TestPairing {
 
     Serial.print(F("      ACCEPTAT ca "));
     printSensorTag(devAddr);
-    Serial.println(F(" - JOIN_ACCEPT trimis, cheie de sesiune salvata."));
+    Serial.println(F(" - JOIN_ACCEPT trimis."));
     Serial.print(F("      Inrolati acum: "));
     Serial.print(DeviceRegistry::count());
     Serial.print(F(" din "));
@@ -400,22 +364,22 @@ namespace TestPairing {
   }
 
   // -------------------------------------------------------------------
-  // DATA_ENC
+  // DATA_UP
   // -------------------------------------------------------------------
 
-  static void handleEncryptedData(const uint8_t* buffer, int length,
+  static void handleData(const uint8_t* buffer, int length,
                                   int rssi, float snr) {
-    EncryptedData data;
-    if (!SensorPacketCodec::parseEncryptedData(buffer, length, data)) {
+    SensorData data;
+    if (!SensorPacketCodec::parseData(buffer, length, data)) {
       s_dataUnknown++;
       return;
     }
 
     // Aici se raspunde la intrebarea "de la cine vine data": DevAddr
-    // circula in CLAR in octetul [2], dar este acoperit de MIC, deci nu
-    // poate fi nici falsificat, nici confundat intre senzori. Doua
-    // pachete simultane se pierd amandoua pe radio; oricare AJUNGE, se
-    // stie fara ambiguitate al cui este.
+    // circula in clar in octetul [2]. ATENTIE: de cand nu mai exista MIC,
+    // raspunsul este DECLARATIV - orice emitator poate pretinde orice
+    // numar. Ce ramane adevarat este ca doua pachete simultane se pierd
+    // amandoua pe radio, deci nu exista "date amestecate".
     DeviceRecord* device = DeviceRegistry::findByAddr(data.devAddr);
     if (device == nullptr) {
       s_dataUnknown++;
@@ -430,10 +394,9 @@ namespace TestPairing {
       // stergerea nu se mai face la prima trimitere de RESET (F-031).
       s_unknownSeen++;
       if (((s_unknownSeen - 1) % PAIRING_UNKNOWN_HINT_EVERY) == 0) {
-        Serial.println(F("       Senzorul are o cheie de sesiune pe care hub-ul nu o mai are, deci"));
-        Serial.println(F("       nu mai poate fi oprit prin comenzi radio. Nici oprirea alimentarii"));
-        Serial.println(F("       nu ajuta: cheia sta in HEF. Recuperare: tine butonul 2 apasat trei"));
-        Serial.println(F("       secunde pe senzor, apoi 'pair' pe hub."));
+        Serial.println(F("       Senzorul se crede inrolat, dar nu are inregistrare aici. Nici"));
+        Serial.println(F("       oprirea alimentarii nu ajuta: starea sta in HEF. Recuperare:"));
+        Serial.println(F("       'pair' pe hub, apoi butonul 2 tinut trei secunde pe senzor."));
       }
       return;
     }
@@ -451,21 +414,10 @@ namespace TestPairing {
       return;
     }
 
-    // MIC-ul acopera primii 13 octeti: antet, adresa, counter si payload
-    // cifrat. Orice bit schimbat pe drum cade aici.
-    if (!HubCrypto::macVerify(device->sessKey, buffer, DATA_ENC_MIC_INPUT_LEN, data.mic)) {
-      s_dataBadMic++;
-      Serial.print(F("[DATA] RESPINS de la "));
-      printSensorTag(data.devAddr);
-      Serial.println(F(": MIC gresit (cheie de sesiune diferita sau pachet modificat)."));
-      return;
-    }
-
     // Dezinrolare in curs. Faptul ca senzorul inca emite este dovada ca
     // nu a primit RESET-ul precedent, deci i se retrimite. Pachetul NU se
     // decodeaza si nu se numara ca date valide: senzorul este pe iesire,
-    // masuratoarea lui nu mai intereseaza pe nimeni. MIC-ul a trecut deja,
-    // deci stim sigur ca el este (F-031).
+    // masuratoarea lui nu mai intereseaza pe nimeni (F-031).
     if (device->pendingReset) {
       // Contorul se avanseaza si aici, altfel un pachet retrimis de
       // senzor ar trece de anti-replay dupa ce dezinrolarea se incheie.
@@ -483,27 +435,23 @@ namespace TestPairing {
       return;
     }
 
-    // Decriptarea. Payload-ul redevine EXACT pachetul de 6 octeti al
-    // senzorului, deci il poate prelua codul existent, neschimbat.
-    uint8_t plain[SENSOR_PACKET_LEN];
-    memcpy(plain, data.payload, SENSOR_PACKET_LEN);
-
-#if PAIRING_ENCRYPT_PAYLOAD
-    uint8_t iv[XTEA_BLOCK_LEN];
-    HubCrypto::buildDataIv(iv, data.devAddr, data.frameCounter, 0x00);
-    HubCrypto::ctr(device->sessKey, iv, plain, SENSOR_PACKET_LEN);
-#endif
+    // Payload-ul este EXACT pachetul de 6 octeti al senzorului, deci il
+    // preia codul existent, neschimbat - acelasi pe care il foloseste si
+    // testul 7.
+    const uint8_t* plain = data.payload;
 
     SensorPacket packet;
     if (!SensorPacketCodec::decode(plain, SENSOR_PACKET_LEN, packet)) {
-      // MIC-ul a trecut, deci pachetul chiar vine de la device-ul nostru,
-      // dar continutul nu se valideaza: cel mai probabil comutatorul
-      // PAIRING_ENCRYPT_PAYLOAD difera intre hub si senzor.
+      // Pachetul a trecut de CRC-ul LoRa si de verificarea de lungime,
+      // dar cei 6 octeti nu se valideaza. Fara MIC asta nu mai inseamna
+      // "cheie gresita": inseamna ori un emitator strain care nimereste
+      // aceiasi parametri radio si aceeasi adresa, ori un capat ramas pe
+      // firmware vechi.
       s_dataBadMic++;
       Serial.print(F("[DATA] "));
       printSensorTag(data.devAddr);
-      Serial.println(F(": MIC bun, dar payload-ul decriptat nu trece de checksum."));
-      Serial.println(F("       Verifica PAIRING_ENCRYPT_PAYLOAD: trebuie identic pe hub si pe senzor."));
+      Serial.println(F(": payload-ul nu trece de checksum. Emitator strain sau"));
+      Serial.println(F("       firmware nesincronizat intre senzor si hub."));
       SensorPacketCodec::printRaw(plain, SENSOR_PACKET_LEN);
       Serial.println();
       return;
@@ -599,7 +547,7 @@ namespace TestPairing {
 
   bool begin() {
     printTitle("PAIRING CRIPTAT - INROLARE SI DATE");
-    Serial.println(F("Ascult JOIN_REQ (0x10) si DATA_ENC (0x12) de la nodurile senzor."));
+    Serial.println(F("Ascult JOIN_REQ (0x10) si DATA_UP (0x12) de la nodurile senzor."));
     Serial.print(F("Reteaua are loc pentru "));
     Serial.print(HUB_MAX_SENSORS);
     Serial.println(F(" senzori; fiecare are un numar fix, dat de pozitia lui"));
@@ -644,8 +592,8 @@ namespace TestPairing {
           handleJoinRequest(buffer, length, rssi, snr);
           break;
 
-        case SENSOR_MSG_DATA_ENC:
-          handleEncryptedData(buffer, length, rssi, snr);
+        case SENSOR_MSG_DATA_UP:
+          handleData(buffer, length, rssi, snr);
           break;
 
         case SENSOR_MSG_TEMPERATURE:
@@ -699,7 +647,7 @@ namespace TestPairing {
     Serial.print(F("  inrolari refuzate  : ")); Serial.println(s_joinsRejected);
     Serial.print(F("  pachete de date OK : ")); Serial.println(s_dataValid);
     Serial.print(F("  replay respinse    : ")); Serial.println(s_dataReplay);
-    Serial.print(F("  MIC gresit         : ")); Serial.println(s_dataBadMic);
+    Serial.print(F("  payload invalid    : ")); Serial.println(s_dataBadMic);
     Serial.print(F("  adresa necunoscuta : ")); Serial.println(s_dataUnknown);
     Serial.print(F("  pachete straine    : ")); Serial.println(s_foreign);
     Serial.print(F("  pachete pierdute   : ")); Serial.print(s_lostTotal);

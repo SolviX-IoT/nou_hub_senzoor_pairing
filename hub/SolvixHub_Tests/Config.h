@@ -50,7 +50,7 @@
 //   ~14 dBm      <- RegPaConfig     = 0x8F (PA_BOOST)
 //
 // PAIRING-UL NU SCHIMBA NICIUNUL DINTRE ACESTI PARAMETRI. Inrolarea si
-// datele criptate circula pe exact aceeasi modulatie ca pachetul de
+// datele de temperatura circula pe exact aceeasi modulatie ca pachetul de
 // temperatura in clar; se schimba doar continutul pachetelor.
 #define LORA_SPREADING_FACTOR  7
 #define LORA_BANDWIDTH_HZ      125E3
@@ -114,18 +114,7 @@ extern byte HUB_MAC[6];
 // Aprins continuu inseamna doar "radioul asculta".
 #define PAIRING_BLINK_MS          250UL
 
-// 1 = payload-ul de temperatura din DATA_ENC este criptat cu XTEA-CTR.
-// 0 = solutia de rezerva pentru cazul in care nici XTEA nu ar mai incapea
-//     in flash-ul senzorului: payload-ul circula in clar, dar ramane
-//     autentificat cu MIC. TREBUIE sa aiba aceeasi valoare ca
-//     PAIRING_ENCRYPT_PAYLOAD din senzor/main.c - altfel hub-ul
-//     "decripteaza" un text clar si obtine gunoi (F-023).
-//
-// Cu XTEA, senzorul incape in PIC16LF1508 cu payload-ul criptat, deci
-// valoarea normala este 1.
-#define PAIRING_ENCRYPT_PAYLOAD   1
-
-// 1 = dupa fiecare DATA_ENC valid, hub-ul trimite un CMD_DOWN de tip ACK.
+// 1 = dupa fiecare DATA_UP valid, hub-ul trimite un CMD_DOWN de tip ACK.
 //     Senzorul deschide oricum o fereastra de receptie dupa transmisie,
 //     deci nu costa nimic in plus la el; costa insa timp de emisie pe
 //     hub. Se poate lasa pe 0 fara nicio consecinta functionala.
@@ -165,7 +154,7 @@ extern byte HUB_MAC[6];
 // 180 s inseamna patru cicluri in cazul cel mai lent si peste sapte
 // pentru senzorul #1. Prea mica este PERICULOS, nu doar incomod: hub-ul
 // ar declara dezinrolarea confirmata in timp ce senzorul doar doarme, ar
-// sterge inregistrarea SI cheia de sesiune, iar la trezire senzorul ar
+// sterge inregistrarea, iar la trezire senzorul ar
 // emite cu cheia veche fara ca hub-ul sa-l mai poata opri vreodata -
 // fundatura din F-031, de data asta fara iesire. Prea mare doar
 // intarzie reinrolarea.
@@ -208,7 +197,7 @@ extern byte HUB_MAC[6];
 // este o proprietate a placii, nu un accident al ordinii de pornire.
 //
 // Acelasi numar se scrie si pe senzor, ca SENSOR_NODE_ID in
-// senzor/main.c: el determina acolo DevEUI, AppKey si slotul de somn.
+// senzor/main.c: el determina acolo DevEUI si slotul de somn.
 // Cele doua trebuie sa corespunda - randul N din tabel <-> placa cu
 // SENSOR_NODE_ID = N.
 //
@@ -267,52 +256,31 @@ extern byte HUB_MAC[6];
 #define REGISTRY_SAVE_EVERY       20
 
 // ---------------------------------------------------------------------
-// LISTA DE PROVISIONING: DevEUI -> AppKey
+// LISTA DE PROVISIONING: DevEUI-urile care au voie in retea
 // ---------------------------------------------------------------------
-// Numai senzorii de aici se pot inrola. AppKey nu circula niciodata prin
-// aer: serveste la verificarea JOIN_REQ, la cifrarea JOIN_ACCEPT si la
-// derivarea cheii de sesiune.
+// Numai senzorii de aici se pot inrola. AppKey-urile au disparut odata
+// cu criptografia; ce a ramas este lista de identitati admise si -
+// mai important - ORDINEA lor.
 //
 // **ORDINEA RANDURILOR ESTE SEMNIFICATIVA.** Pozitia din tabel, plus
-// unu, este DevAddr-ul pe care hub-ul il aloca la inrolare, adica
-// numarul sub care apare senzorul peste tot in jurnal si in comenzi.
+// unu, este DevAddr-ul pe care hub-ul il da la inrolare, adica numarul
+// sub care apare senzorul peste tot in jurnal si in comenzi.
 // Randul 1 <-> Senzor #1 <-> placa programata cu SENSOR_NODE_ID = 1.
 // Nu se rearanjeaza randurile intr-o retea deja instalata: senzorii si-ar
-// schimba numerele intre ei, iar cheile de sesiune din registru ar
-// ramane pe adresele vechi.
+// schimba numerele intre ei.
 //
-// Fiecare rand trebuie sa corespunda EXACT cu PROVISION_DEV_EUI si
-// PROVISION_APP_KEY din senzor/main.c ale placii respective - adica, in
-// practica, cu SENSOR_NODE_ID, din care ies amandoua. O singura cifra
-// diferita si senzorul este respins cu "MIC gresit", fara alt indiciu.
+// Fiecare rand trebuie sa corespunda EXACT cu PROVISION_DEV_EUI din
+// senzor/main.c al placii respective - adica, in practica, cu
+// SENSOR_NODE_ID, din care iese DevEUI-ul.
 //
-// Cheile de mai jos sunt cele de DEZVOLTARE, identice cu blocul
-// #if SENSOR_NODE_ID din senzor/main.c. Inainte de punerea in
-// exploatare se inlocuiesc, tot in pereche, pe ambele capete.
+// CE SE INTAMPLA DACA NU CORESPUND: pana acum, o placa programata cu un
+// numar care nu se potrivea cu randul ei era respinsa cu "MIC gresit".
+// Acum simptomul este altul si se vede pe SENZOR, nu pe hub: hub-ul
+// raspunde cu numarul din tabel, placa asteapta numarul ei compilat,
+// nu se potrivesc, JOIN_ACCEPT-ul este aruncat si LED2 da trei clipiri.
 //
 // Tabelul este instantiat in DeviceRegistry.cpp; aici stau doar valorile,
 // ca sa ramana adevarata regula "constantele traiesc in Config.h".
-#define PROVISIONED_DEVICES_INIT { \
-  /* #1 */                                                                  \
-  { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x01 },                     \
-    { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,                       \
-      0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF } },                   \
-  /* #2 */                                                                  \
-  { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x02 },                     \
-    { 0x2A, 0x7F, 0x13, 0xC4, 0x9E, 0x06, 0xB8, 0x51,                       \
-      0x3D, 0xE2, 0x74, 0xAF, 0x60, 0x1C, 0x95, 0xD8 } },                   \
-  /* #3 */                                                                  \
-  { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x03 },                     \
-    { 0x5B, 0x08, 0xE1, 0x96, 0x34, 0xCD, 0x72, 0xAF,                       \
-      0x1E, 0x60, 0xB5, 0x27, 0xD9, 0x43, 0x8C, 0xF0 } },                   \
-  /* #4 */                                                                  \
-  { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x04 },                     \
-    { 0x91, 0x4C, 0x26, 0xD3, 0x5F, 0xA8, 0x07, 0xEB,                       \
-      0x62, 0x1D, 0xB4, 0x78, 0x3A, 0xC5, 0xE9, 0x20 } },                   \
-  /* #5 */                                                                  \
-  { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x05 },                     \
-    { 0xC7, 0x3E, 0x8A, 0x15, 0xD0, 0x6B, 0xF2, 0x49,                       \
-      0xA3, 0x5C, 0x91, 0x2E, 0x87, 0xF6, 0x04, 0xBD } },                   \
-}
+#define PROVISIONED_DEVICES_INIT {   /* #1 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x01 } },            /* #2 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x02 } },            /* #3 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x03 } },            /* #4 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x04 } },            /* #5 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x05 } },          }
 
 #endif // CONFIG_H

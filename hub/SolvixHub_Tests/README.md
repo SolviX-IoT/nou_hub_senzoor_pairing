@@ -1,4 +1,4 @@
-# SolvixHub_Tests — varianta cu pairing criptat
+# SolvixHub_Tests — varianta cu pairing, fara criptare
 
 Suita de teste hardware pentru hub-ul pe ESP32, ca un singur sketch
 Arduino modular. Fata de varianta din `teste-sistemcomplet`, aici se
@@ -20,12 +20,12 @@ Din Library Manager:
 
 Placa: *ESP32 Dev Module*, din pachetul `esp32` by Espressif Systems.
 
-> **Pentru criptografie nu este nevoie de nicio biblioteca.** Cifrul este
-> XTEA-128, scris explicit in `HubCrypto.cpp`, fiindca trebuie sa fie
-> identic bit cu bit cu implementarea de pe PIC (F-024). Fisierul se
-> numeste `HubCrypto.h`, **nu** `Crypto.h`, ca sa nu ascunda antetul unei
-> biblioteci cu acel nume daca cineva o instaleaza: Arduino IDE cauta
-> intai in folderul sketch-ului (F-021).
+> **Criptografia a fost scoasa la 2026-08-29 (F-038).** Nu mai incapea in
+> PIC16LF1508: firmware-ul senzorului ajunsese la 97,7% ocupare, cu 92 de
+> cuvinte marja. `HubCrypto.*` a disparut din sketch. **Reteaua nu mai
+> este autentificata** — oricine cu un radio LoRa pe aceiasi parametri
+> poate injecta date, dezinrola o placa sau inrola una falsa. Este o
+> masura temporara; ultima versiune cu cifru este commit-ul `a710142`.
 
 ## Cum se ruleaza
 
@@ -42,7 +42,7 @@ Placa: *ESP32 Dev Module*, din pachetul `esp32` by Espressif Systems.
 | 5 | LoRa: receptie |
 | 6 | Coexistenta LoRa + Ethernet |
 | 7 | Senzor: receptie temperatura **in clar** |
-| 8 | **Pairing criptat: inrolare + date** |
+| 8 | **Pairing: inrolare + date** |
 | 0 | Opreste testul curent |
 | m | Reafiseaza meniul |
 
@@ -60,7 +60,7 @@ Se scriu ca text, nu ca cifre, si merg si in timpul unui test:
 | `provisioned` | Senzorii care **au voie** sa se inroleze (lista din `Config.h`), cu numarul fiecaruia |
 | `remove <DevEUI>` | Il scoate din retea. Primeste `CMD_DOWN(RESET)` la **fiecare** pachet al lui, iar inregistrarea dispare abia dupa ce senzorul **tace** `REMOVE_CONFIRM_SILENCE_MS` — tacerea e dovada ca a primit comanda (F-031). Refuzat daca senzorul nu a trimis niciodata nimic. |
 | `remove #3` | Acelasi lucru, dar dupa **numarul** senzorului |
-| `remove <...> force` | Il sterge imediat din registru, fara sa il anunte. Senzorul pastreaza cheia si continua sa emita; recuperarea se face de la butonul 2 al senzorului |
+| `remove <...> force` | Il sterge imediat din registru, fara sa il anunte. Senzorul se crede in continuare inrolat si continua sa emita; recuperarea se face de la butonul 2 al senzorului |
 | `stats` | Contoarele testului de pairing, apoi tabelul `sensors` |
 | `help` | Lista aceasta |
 
@@ -78,7 +78,7 @@ Hub-ul tine `HUB_MAX_SENSORS` senzori — implicit **5**. Fiecare are un
 **numar** fix, de la 1 la 5.
 
 Numarul nu este o eticheta pusa pe deasupra: este chiar **`DevAddr`**,
-octetul `[2]` din fiecare `DATA_ENC` si din fiecare `CMD_DOWN`. Si nu
+octetul `[2]` din fiecare `DATA_UP` si din fiecare `CMD_DOWN`. Si nu
 vine din ordinea inrolarii, ci din **pozitia senzorului in tabelul
 `PROVISIONED_DEVICES_INIT` din `Config.h`**. Consecinta este tot rostul
 schemei:
@@ -90,17 +90,15 @@ schemei:
 
 Aceeasi cifra se scrie si pe placa, ca **`SENSOR_NODE_ID`** in
 `senzor/main.c`. Este singura linie care se schimba intre cele cinci
-firmware-uri: din ea ies acolo `DevEUI`, `AppKey` si slotul de somn.
+firmware-uri: din ea ies acolo `DevEUI` si slotul de somn.
 Randul N din tabel corespunde placii cu `SENSOR_NODE_ID = N`.
 
 ### De la cine vine data
 
-`DevAddr` circula **in clar** — hub-ul trebuie sa il citeasca inainte de
-a sti ce cheie sa foloseasca — dar intra in zona acoperita de MIC, iar
-MIC-ul se calculeaza cu cheia de sesiune a acelui senzor. Un pachet cu
-adresa modificata pe drum, sau un senzor care ar minti in privinta ei,
-nu se verifica cu nicio cheie din registru. Identificarea este deci in
-clar, dar nu este falsificabila.
+`DevAddr` circula **in clar** in octetul `[2]`. De cand nu mai exista
+MIC, atributia este **declarativa**: orice emitator cu aceiasi parametri
+radio poate pretinde orice numar. Pana la F-038, adresa intra in zona
+semnata cu cheia de sesiune a acelui senzor si nu putea fi falsificata.
 
 Nu exista cazul „date amestecate intre senzori": doua pachete care se
 suprapun in aer se pierd **amandoua**, deci ori un pachet ajunge intreg
@@ -127,7 +125,7 @@ despart de la sine dupa o perioada. **Jitter-ul aleator** de la fiecare
 ciclu rupe si cazul in care doua placi ar nimeri acelasi numar de
 treziri, si pornirea simultana dupa o pana de curent.
 
-Un `DATA_ENC` de 17 octeti sta pe aer ~46 ms la SF7/BW125/CR4-5, iar un
+Un `DATA_UP` de 13 octeti sta pe aer ~41 ms la SF7/BW125/CR4-5, iar un
 senzor emite o data la ~30 s: ocuparea canalului este de 0,15% per placa.
 Cate o coliziune izolata tot se intampla, si de aceea hub-ul o **numara**
 — vezi coloana `pierd.` din `sensors`.
@@ -144,23 +142,22 @@ exact a uneia trece neobservata.
 
 1. `pair` pe hub — fereastra ramane deschisa `PAIRING_MODE_TIMEOUT_MS`
    (implicit 2 minute).
-2. Senzorul ne-inrolat trimite `JOIN_REQ` (DevEUI + DevNonce + MIC).
-3. Hub-ul cauta DevEUI in lista din `Config.h`, verifica MIC-ul cu
-   `AppKey`, verifica sa nu fie un `DevNonce` deja folosit, aloca un
-   `DevAddr`, deriva `SessKey` si raspunde cu `JOIN_ACCEPT`.
-4. Senzorul despacheteaza `JOIN_ACCEPT` (CTR, deci fara cod de
-   descifrare), deriva aceeasi `SessKey`, o scrie in HEF si trece in
-   regim normal.
-5. De aici incolo, temperatura vine ca `DATA_ENC` — criptata cu XTEA-CTR
-   si semnata cu CBC-MAC. Dupa decriptare, payload-ul este **exact acelasi
-   pachet de 6 octeti** ca la testul 7 si trece prin acelasi
-   `SensorPacketCodec::decode()`.
+2. Senzorul ne-inrolat trimite `JOIN_REQ` (10 octeti: antet + DevEUI).
+3. Hub-ul cauta DevEUI in lista din `Config.h` si ii da numarul din
+   POZITIA lui in acea lista, prin `JOIN_ACCEPT` (3 octeti).
+4. Senzorul verifica faptul ca numarul primit este chiar cel pe care il
+   asteapta (`SENSOR_NODE_ID`), il scrie in HEF si trece in regim normal.
+   Daca nu se potriveste, join-ul esueaza vizibil, cu trei clipiri pe
+   LED2 — diagnosticul care a inlocuit sirul de "MIC gresit".
+5. De aici incolo, temperatura vine ca `DATA_UP`, in clar. Payload-ul
+   este **exact acelasi pachet de 6 octeti** ca la testul 7 si trece prin
+   acelasi `SensorPacketCodec::decode()`.
 
-Un senzor **neprovizionat** (DevEUI absent din `Config.h`) sau cu
-`AppKey` gresita este refuzat cu mesaj explicit. Un `JOIN_REQ` sau un
-`DATA_ENC` rejucat este respins si numarat separat in `stats`.
+Un senzor **neprovizionat** (DevEUI absent din `Config.h`) este refuzat
+cu mesaj explicit. Un `DATA_UP` rejucat este respins si numarat separat
+in `stats` — este singura aparare ramasa pe calea de date.
 
-**Senzorul nu se inroleaza singur.** Fara sesiune sta in repaus si tace;
+**Senzorul nu se inroleaza singur.** Ne-inrolat sta in repaus si tace;
 fereastra lui se deschide tinand **butonul 2 (RC5) apasat trei secunde**.
 Deci pasul 1 si pasul 2 de mai sus cer amandoua o interventie umana: `pair`
 pe hub *si* apasarea de pe senzor.
@@ -171,16 +168,15 @@ Un downlink are o singura sansa: senzorul asculta doar 600 ms dupa fiecare
 transmisie a lui. De aceea `remove` **nu** crede ca a reusit din prima
 (F-031):
 
-1. `remove <DevEUI>` doar **marcheaza** device-ul. Inregistrarea si cheia
-   raman pe loc.
+1. `remove <DevEUI>` doar **marcheaza** device-ul. Inregistrarea ramane
+   pe loc.
 2. La **fiecare** pachet primit de la el, hub-ul retrimite
    `CMD_DOWN(RESET)` si numara incercarea. Un senzor care inca emite este
    dovada ca nu a primit comanda. Pachetele lui nu se mai afiseaza ca
    masuratori.
 3. Cand senzorul **tace** `REMOVE_CONFIRM_SILENCE_MS`, dezinrolarea este
-   confirmata: el a primit RESET-ul, si-a sters sesiunea din HEF si a
-   intrat in repaus. Abia acum inregistrarea dispare din registru si
-   hub-ul renunta la cheie.
+   confirmata: el a primit RESET-ul, si-a sters inrolarea din HEF si a
+   intrat in repaus. Abia acum inregistrarea dispare din registru.
 4. Cu `PAIRING_REOPEN_AFTER_REMOVE = 1`, fereastra de pairing se
    redeschide singura. Pentru reinrolare mai este nevoie si de cele trei
    secunde pe butonul 2 al senzorului.
@@ -192,25 +188,25 @@ trimise si cat a trecut de la ultimul.
 RESET-ul nu are cum sa plece, iar marcarea ar bloca inregistrarea la
 nesfarsit. Ori porneste senzorul, ori foloseste `force`.
 
-**Un senzor ramas cu o cheie veche** (dupa un `force`, sau dupa o
-dezinrolare esuata cu firmware-ul dinainte de F-031) emite pachete pe care
-hub-ul le vede ca `DevAddr` neinrolat si pe care nu le mai poate opri prin
-radio — nu mai are cheia. Se recupereaza doar de pe senzor: butonul 2
+**Un senzor ramas inrolat pe cont propriu** (dupa un `force`, dupa o
+golire a registrului, sau dupa o dezinrolare esuata) emite pachete pe care
+hub-ul le vede ca `DevAddr` neinrolat. Se recupereaza de pe senzor: butonul 2
 apasat trei secunde. Hub-ul aminteste asta la fiecare
 `PAIRING_UNKNOWN_HINT_EVERY` pachete de acest fel.
 
 ## Ce se pastreaza peste repornire
 
-> **La actualizarea la versiunea cu mai multi senzori:**
-> `REGISTRY_BLOB_VERSION` a trecut pe **3**, fiindca `DeviceRecord` a
-> primit campuri noi. Registrul salvat de versiunea precedenta este
-> ignorat, deci hub-ul porneste cu registrul gol, in timp ce senzorii
-> isi pastreaza sesiunile in HEF: ei continua sa emita si apar ca
-> `DevAddr ... nu este inrolat`. Fiecare trebuie **reinrolat o data**,
-> manual. Numarul primit inapoi este acelasi ca inainte, fiindca vine
-> din tabelul de provisioning, nu din ordinea inrolarii.
+> **La actualizarea la versiunea fara criptare (F-038):**
+> `REGISTRY_BLOB_VERSION` a trecut pe **4**, fiindca `DeviceRecord` a
+> pierdut `sessKey` si `lastDevNonce`. Registrul salvat de versiunea
+> precedenta este ignorat, deci hub-ul porneste gol — dar **si senzorii
+> pornesc goli**, fiindca `HEF_MAGIC_SESSION` s-a schimbat in acelasi
+> commit. Ambele capete sunt deci in aceeasi stare, iar recuperarea este
+> cea normala: `pair` pe hub plus butonul 2 tinut trei secunde pe fiecare
+> placa. Numarul primit inapoi este acelasi ca inainte, fiindca vine din
+> tabelul de provisioning, nu din ordinea inrolarii.
 
-Registrul (`DevEUI`, `DevAddr`, `SessKey`, ultimul frame counter) traieste
+Registrul (`DevEUI`, `DevAddr`, ultimul frame counter, contoare) traieste
 in **NVS**, prin `Preferences`, in spatiul `solvix-pair`. Se salveaza la
 fiecare inrolare, la fiecare stergere si o data la `REGISTRY_SAVE_EVERY`
 pachete de date. NVS este flash: scrierea la fiecare pachet l-ar uza
@@ -288,23 +284,23 @@ Masurile luate, toate in [SpiBus.h](SpiBus.h) si [SpiBus.cpp](SpiBus.cpp):
 Parametrii de modulatie din [Config.h](Config.h) trebuie sa fie
 **identici** cu valorile scrise in registrele SX1276 de firmware-ul
 senzorului. **Pairing-ul nu schimba niciunul dintre ei**: inrolarea si
-datele criptate circula pe exact aceeasi modulatie ca pachetul de
+datele circula pe exact aceeasi modulatie ca pachetul de
 temperatura in clar.
 
-Doua constante trebuie insa sa fie identice pe cele doua capete, altfel
+Cateva lucruri trebuie insa sa fie identice pe cele doua capete, altfel
 totul pare "corect" dar nimic nu se valideaza:
 
 | Pe hub (`Config.h`) | Pe senzor (`main.c`) |
 |---------------------|----------------------|
-| `PAIRING_ENCRYPT_PAYLOAD` | `PAIRING_ENCRYPT_PAYLOAD` |
-| randul N din `PROVISIONED_DEVICES_INIT` | `SENSOR_NODE_ID = N`, din care ies `PROVISION_DEV_EUI` si `PROVISION_APP_KEY` |
+| lungimile din `SensorPacket.h` (6/10/3/13/4) | aceleasi, in `main.c` sectiunea 4 — si trebuie sa ramana **distincte** |
+| randul N din `PROVISIONED_DEVICES_INIT` | `SENSOR_NODE_ID = N`, din care iese `PROVISION_DEV_EUI` |
 | `REMOVE_CONFIRM_SILENCE_MS` si `SENSOR_OFFLINE_MS` | `SLEEP_WAKEUPS_BASE`, `SLEEP_SLOT_MASK`, `SLEEP_JITTER_MASK` |
 
 Ultima linie nu este o simetrie de forma, ci o dependenta reala: hub-ul
 confirma dezinrolarea prin **tacere**, iar un senzor care doarme tace si
 el. Daca somnul creste peste fereastra de confirmare, hub-ul sterge
-inregistrarea **si cheia** in timp ce senzorul doar doarme, si nu il mai
-poate opri niciodata (F-031, F-034, F-036). Atentie in special la
+inregistrarea in timp ce senzorul doar doarme, iar la trezire senzorul
+emite catre un hub care nu il mai recunoaste (F-031, F-034, F-036). Atentie in special la
 cresterea lui `HUB_MAX_SENSORS`: ultimul senzor primeste automat cel mai
 lung interval de somn.
 

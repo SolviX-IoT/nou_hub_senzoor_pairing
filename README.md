@@ -15,9 +15,16 @@ numar fix de la 1 la 5.
 > placa. Este o masura temporara, pana la un microcontroller cu mai multa
 > memorie; ultima versiune cu cifru este commit-ul `a710142`.
 
-Contextul complet — pini, protocol, memorie ne-volatila, istoric de
-bug-uri — este in [CLAUDE.md](CLAUDE.md). Instructiunile de utilizare ale
-hub-ului sunt in [hub/SolvixHub_Tests/README.md](hub/SolvixHub_Tests/README.md).
+Documentatia este impartita in trei:
+
+- **[CLAUDE.md](CLAUDE.md)** — referinta activa: pini, protocol, memorie
+  ne-volatila, regulile de lucru si conventia de mesaje de commit.
+- **[MEMORY.md](MEMORY.md)** — starea de acum: cifrele de incadrare, versiunile
+  de format, ce se schimba la fiecare placa.
+- **[ISTORIC.md](ISTORIC.md)** — arhiva `F-001…F-038`: simptom, cauza, fix.
+
+Instructiunile de utilizare ale hub-ului sunt in
+[hub/SolvixHub_Tests/README.md](hub/SolvixHub_Tests/README.md).
 
 ## Ce face sistemul
 
@@ -74,8 +81,7 @@ dupa o dezinrolare, deci poate fi scris pe cutie.
 
 | Pe senzor (`senzor/main.c`) | Pe hub (`hub/SolvixHub_Tests/Config.h`) |
 |-----------------------------|------------------------------------------|
-| `SENSOR_NODE_ID` = 1..5 — din el ies `PROVISION_DEV_EUI`, `PROVISION_APP_KEY` si slotul de somn | randul N din `PROVISIONED_DEVICES_INIT`, deja completat pentru toate cele 5 placi |
-| `PAIRING_ENCRYPT_PAYLOAD` | `PAIRING_ENCRYPT_PAYLOAD` — **identic** |
+| `SENSOR_NODE_ID` = 1..5 — din el ies `PROVISION_DEV_EUI` si slotul de somn | randul N din `PROVISIONED_DEVICES_INIT`, deja completat pentru toate cele 5 placi — nimic de schimbat |
 
 Ordinea randurilor din `PROVISIONED_DEVICES_INIT` **da numerele
 senzorilor**; nu se rearanjeaza intr-o retea deja instalata.
@@ -109,8 +115,9 @@ compileaza.
 Marja este acum de **1573 de cuvinte si 161 de octeti**. Pana la
 2026-08-29 firmware-ul avea criptografie si ocupa 3876 de cuvinte, adica
 97,7% — 92 de cuvinte marja, in care nu mai incapea nimic. Scoaterea
-cifrului (F-038) a eliberat 1481 de cuvinte si 137 de octeti. Detalii in
-[CLAUDE.md](CLAUDE.md), sectiunea 2 si F-038.
+cifrului (F-038) a eliberat 1481 de cuvinte si 137 de octeti. Cifrele
+curente sunt in [MEMORY.md](MEMORY.md); motivul, in
+[ISTORIC.md](ISTORIC.md) la F-038.
 
 ## Librarii necesare pe hub
 

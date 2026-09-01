@@ -9,7 +9,7 @@
 > - **[MEMORY.md](MEMORY.md)** — starea de acum: cifrele de incadrare,
 >   versiunile de format, ce se schimba la fiecare placa. Citeste-l cand
 >   intrebi "unde am ramas" sau cand verifici ce s-a programat pe cip.
-> - **[ISTORIC.md](ISTORIC.md)** — arhiva `F-001…F-038`: simptom, cauza, fix.
+> - **[ISTORIC.md](ISTORIC.md)** — arhiva `F-001…F-045`: simptom, cauza, fix.
 >   Citeste-l cand un mesaj de commit citeaza o eticheta `F-0xx`, cand vrei
 >   motivul din spatele unei decizii, sau cand un simptom pare cunoscut.
 >
@@ -47,7 +47,8 @@ pachet si sterge inregistrarea abia dupa ce senzorul tace — tacerea este dovad
 ca a primit comanda (F-031).
 
 Payload-ul de temperatura este **exact acelasi pachet de 6 octeti** ca inainte,
-deci trece prin acelasi cod de interpretare ca testul 7.
+deci trece prin acelasi `SensorPacketCodec::decode()` ca pachetul unui senzor
+neinrolat: nu exista doua cai de interpretare a temperaturii.
 
 ### Avertisment: reteaua NU este autentificata
 
@@ -69,8 +70,15 @@ nou_hub_senzoor_pairing/
 ├── CLAUDE.md · MEMORY.md · ISTORIC.md · README.md
 ├── PINOUT_config.pdf        <- schema de conexiuni
 ├── senzor/                  <- proiect MPLAB X: firmware-ul nodului senzor
-└── hub/SolvixHub_Tests/     <- sketch Arduino: suita de teste, meniu pe Serial
+└── hub/SolvixHub_Tests/     <- sketch Arduino: firmware-ul hub-ului
 ```
+
+Hub-ul **nu mai este o suita de teste**. Pana la 2026-09-01 a fost un meniu pe
+Serial din care se pornea cate un test o data, iar produsul propriu-zis traia
+in „testul 8"; acum porneste singur si ruleaza permanent (F-039). Numele
+folderului a ramas insa `SolvixHub_Tests` — redenumirea este un pas separat,
+fiindca Arduino IDE cere ca folderul si `.ino`-ul sa se numeasca la fel si un
+`git mv` in acelasi commit ar face diff-ul necitibil.
 
 Numele folderului `SolvixHub_Tests` **nu este optional**: Arduino IDE cere ca
 folderul sketch-ului si fisierul `.ino` principal sa aiba acelasi nume. Toate
@@ -130,10 +138,13 @@ deloc** (F-017), singura temporizare este `__delay_ms()` la `_XTAL_FREQ` = 16 MH
 | **22** | LED 1 (`PIN_LED_1`) | — | activitate: pachet valid |
 | **21** | LED 2 (`PIN_LED_2`) | — | stare: aprins cat asculta, clipeste in mod pairing |
 
-Butonul 1 este ascultat **doar** cand nu ruleaza niciun test sau cand ruleaza
-testul 8 — altfel zgomotul de pe o linie flotanta ar comuta testele singur
-(F-008). Polaritatea LED-urilor este presupusa **activa HIGH**; daca sunt
-cablate invers, se schimba `LED_ON_LEVEL` in `Config.h`, nicaieri altundeva.
+Butonul 1 deschide fereastra de pairing. Cat timp exista suita de teste, era
+ascultat doar in afara lor sau in testul 8, ca zgomotul de pe linia flotanta sa
+nu comute testele singur (F-008); testele au disparut, deci si conditia, iar
+cel mai rau pe care il poate face zgomotul acum este o fereastra de inrolare
+deschisa degeaba, care se inchide singura. Polaritatea LED-urilor este
+presupusa **activa HIGH**; daca sunt cablate invers, se schimba `LED_ON_LEVEL`
+in `Config.h`, nicaieri altundeva.
 
 ### 2.3. Parametrii radio LoRa — identici pe ambele capete
 
@@ -319,22 +330,27 @@ manual — numarul primit inapoi ramane insa acelasi (F-037).
 
 ### 5.2. `hub/SolvixHub_Tests/` — sketch Arduino
 
+**Nu mai este o suita de teste.** Meniul de cifre si cele sapte teste
+independente au disparut la 2026-09-01 (F-039); hub-ul porneste singur si
+ruleaza permanent. Ce era „testul 8" este acum runtime-ul `SensorLink`.
+
 | Fisier | Rol |
 |--------|-----|
-| `SolvixHub_Tests.ino` | Meniu pe Serial (115200), tabloul `TESTS[]`, comenzile `pair` / `sensors` / `list` / `provisioned` / `remove` / `stats` / `help`, butonul 1 ca declansator de pairing. `commandRemove()` doar **marcheaza** device-ul, refuza marcarea unui senzor care nu a trimis niciodata nimic (trimite la `force`) si accepta si forma scurta `remove #3` |
-| `Config.h` | **Singura sursa de adevar pentru pini** si constante: SPI, ETH, LoRa, butoane, LED-uri, sectiunea de pairing (`PAIRING_MODE_TIMEOUT_MS`, `PAIRING_SEND_ACK`, `REMOVE_CONFIRM_SILENCE_MS`, `REGISTRY_*`) si sectiunea multi-senzor (`HUB_MAX_SENSORS`, `SENSOR_OFFLINE_MS`, `SENSOR_FCNT_GAP_RESTART`, `PROVISIONED_DEVICES_INIT` — **ordinea randurilor da numarul fiecarui senzor**) |
-| `SpiBus.*` | Arbitrajul magistralei partajate; `SpiGuard` ridica CS-ul in destructor |
-| `TestBase.*` | `Test { name, description, begin, tick, stop }` + ajutoare de afisare |
+| `SolvixHub_Tests.ino` | Doar `setup()`, `loop()` si butonul 1. `setup()` merge in ordinea Leds -> SpiBus -> registru -> identitate -> **SensorLink (radioul asculta)** -> NetLink -> HubCloud -> consola: radioul porneste inaintea retelei, iar **esecul retelei nu opreste boot-ul**. `loop()` nu contine nimic blocant |
+| `Config.h` | **Singura sursa de adevar pentru pini** si constante: SPI, ETH, LoRa, butoane, LED-uri, sectiunea de pairing (`PAIRING_MODE_TIMEOUT_MS`, `PAIRING_SEND_ACK`, `REMOVE_CONFIRM_SILENCE_MS`, `REGISTRY_*`), sectiunea multi-senzor (`HUB_MAX_SENSORS`, `SENSOR_OFFLINE_MS`, `SENSOR_FCNT_GAP_RESTART`, `PROVISIONED_DEVICES_INIT` — **ordinea randurilor da numarul fiecarui senzor**), si **sectiunile noi RETEAUA si CLOUD**: `HUB_NET_TRANSPORT`, `ETH_DHCP_*`, `SPI_BUS_ASSERT`, parametrii de fabrica ai hub-ului, `CLOUD_*`, `HTTP_*`, `IDENTITY_NVS_NAMESPACE` |
+| `SpiBus.*` | Arbitrajul magistralei partajate; `SpiGuard` ridica CS-ul in destructor. **Nou:** `SpiBus::Owner` — un assert de depanare, nu un lacat, care se plange daca un modul cere magistrala fara ca celalalt sa o fi eliberat (F-041) |
+| `Console.*` | Fostul `TestBase.*`. Structura `Test` a disparut; au ramas `printSeparator()`, `printTitle()`, `printHexByte()` |
 | `LoRaRadio.*` | Invelis peste libraria LoRa: `begin()`, `sendText()`, `sendRaw()`, `receive()`, `receiveRaw()`, `sleep()`. Receptia e prin polling |
 | `Leds.*` | Cele doua LED-uri. `set()`, `pulse()`, `service()` fara `delay()` |
 | `SensorPacket.*` | **Oglinda protocolului din `senzor/main.c`**: constantele tuturor tipurilor, `decode()`/`print()`/`printRaw()`, `messageType()`, `parseJoinRequest()`, `parseData()`, `buildJoinAccept()`, `buildCommand()`, `printEui()` |
-| `DeviceRegistry.*` | Registrul pe NVS; `isProvisioned()`, **`addressForEui()`** (numarul din pozitia in tabel, F-037), `printSensorTable()` — vederea de zi cu zi, toate locurile, si cele goale |
-| `EthernetLink.*` | Invelis peste EthernetENC: DHCP cu timeout, `printStatus()`, HTTP GET. Aici e definit `HUB_MAC` |
-| `TestButtons.*` · `TestEncSpi.*` · `TestEthernet.*` | Tranzitii pe GPIO34/35 · diagnostic SPI pe ENC28J60 (`EREVID`) · DHCP+DNS+HTTP |
-| `TestLoRaTx.*` · `TestLoRaRx.*` · `TestCoexistence.*` | Emisie la 2 s · receptie cu RSSI/SNR · ambele module alternativ (LoRa se initializeaza **primul**) |
-| `TestSensorRx.*` | **Testul 7:** asculta pachetul de temperatura in clar. Util la bring-up, cu `ENABLE_PLAIN_TEMP = 1` pe senzor |
-| `TestPairing.*` | **Testul 8:** fereastra de pairing, `JOIN_REQ` -> `JOIN_ACCEPT`, `DATA_UP` -> `decode()`, `CMD_DOWN` (ACK/RESET), contoarele pentru `stats`. Tot aici sta dezinrolarea confirmata: `sendRemovalReset()` + `servicePendingRemovals()` (F-031), `printSensorTag()`, golurile de frame counter si `serviceOfflineWatch()` |
-| `README.md` | Instructiuni de utilizare, comenzile de pairing, tabelul SPI, note hardware |
+| `DeviceRegistry.*` | Registrul pe NVS (`solvix-pair`); `isProvisioned()`, **`addressForEui()`** (numarul din pozitia in tabel, F-037), `printSensorTable()` — vederea de zi cu zi, toate locurile, si cele goale |
+| `SensorLink.*` | Fostul `TestPairing.*`, acum **runtime permanent**: fereastra de pairing, `JOIN_REQ` -> `JOIN_ACCEPT`, `DATA_UP` -> `decode()`, `CMD_DOWN` (ACK/RESET), dezinrolarea confirmata (`sendRemovalReset()` + `servicePendingRemovals()`, F-031), `printSensorTag()`, golurile de frame counter, `serviceOfflineWatch()`. **Nou:** `lastRxMs()` si `hasPendingRemoval()`, cele doua porti prin care trece orice altceva lung din `loop()`; `onReading()`, carligul pentru telemetrie; ACK-ul pleaca acum **inaintea** blocului de log (F-040) |
+| `NetLink.*` | Fostul `EthernetLink.*`, acum agnostic de transport. `acquireClient()` / `releaseClient()` intorc un `Client*` si sunt **si granita magistralei SPI**, deci `Http` nu afla niciodata pe ce transport merge. Ethernet azi, WiFi printr-un `#elif` mai tarziu, fara schimbari la apelanti. Aici e definit `HUB_MAC`. `httpPing()` a disparut |
+| `Http.*` | **NOU.** GET si POST peste un `Client&`, fara niciun `String`: linie de status, antete plafonate, corp marginit, **de-chunker** (serverul raspunde `Transfer-Encoding: chunked`, F-042), `Result` cu status/lungime/durata. Numele nu este `HttpClient.h`, ca sa nu ascunda antetul bibliotecii cu acel nume (aceeasi capcana ca F-021) |
+| `HubIdentity.*` | **NOU.** Identitatea primita de la cloud, in NVS (`solvix-hub`, separat de registru): `hubGuid`, `apiKey`, `pairingCode`, `lifecycleStatus`, `provisionedAt`, `maxSensors` si cele 11 valori de `config`. Versiunea se scrie **ultima** si se sterge **prima**, ca o identitate pe jumatate scrisa sa arate ca una lipsa. `print()` mascheaza `apiKey`; `provisioningSecret` nu se afiseaza deloc |
+| `HubCloud.*` | **NOU.** Masina de stari a bootstrap-ului: `NetWait` -> `Health` -> `Provision` -> `Ready`, cu backoff 5/10/30/60 s. Sanatatea se judeca dupa `"database": "Reachable"`, nu dupa `"status"`. Cererile sunt blocante dar trec prin cele doua porti din `SensorLink` |
+| `SerialConsole.*` | **NOU.** Comenzile de pe Serial, mutate din `.ino`. Citeste **un octet per apel** — `readStringUntil()` bloca pana la o secunda peste o fereastra de downlink (F-040) |
+| `README.md` | Instructiuni de utilizare, comenzile, secventa de pornire, tabelul SPI, note hardware |
 
 ---
 

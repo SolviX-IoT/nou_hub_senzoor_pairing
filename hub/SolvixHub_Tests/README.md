@@ -1,15 +1,19 @@
-# SolvixHub_Tests — varianta cu pairing, fara criptare
+# SolvixHub — hub-ul SolviX pe ESP32
 
-Suita de teste hardware pentru hub-ul pe ESP32, ca un singur sketch
-Arduino modular. Fata de varianta din `teste-sistemcomplet`, aici se
-adauga **inrolarea senzorilor (pairing), criptarea datelor, registrul de
-device-uri si stergerea unui device** — testul **8**.
+Firmware-ul hub-ului, ca un singur sketch Arduino modular. Hub-ul
+**porneste singur si ruleaza permanent**: asculta senzorii pe LoRa, ii
+inroleaza la cerere, isi ia adresa in retea si se provizioneaza in cloud.
+
+> **Pana la 2026-09-01 acesta a fost o SUITA DE TESTE** — un meniu pe
+> Serial din care se pornea cate un test o data, iar produsul propriu-zis
+> (inrolare + receptia temperaturilor) traia in „testul 8". Testele au
+> fost sterse (F-039). Comenzile in cuvinte au ramas si s-au inmultit.
 
 ## Cum se deschide
 
 Arduino IDE cere ca folderul sketch-ului si fisierul `.ino` principal sa
-aiba acelasi nume, ceea ce este deja respectat. Se deschide
-`SolvixHub_Tests.ino`; celelalte fisiere apar automat ca tab-uri.
+aiba acelasi nume. Se deschide `SolvixHub_Tests.ino`; celelalte fisiere
+apar automat ca tab-uri.
 
 ## Librarii necesare
 
@@ -17,6 +21,7 @@ Din Library Manager:
 
 - **EthernetENC** (Juraj Andrassy) — driver pentru ENC28J60
 - **LoRa** (Sandeep Mistry) — driver pentru SX1276/78
+- **ArduinoJson v7** (Benoit Blanchon) — raspunsurile API-ului
 
 Placa: *ESP32 Dev Module*, din pachetul `esp32` by Espressif Systems.
 
@@ -27,41 +32,55 @@ Placa: *ESP32 Dev Module*, din pachetul `esp32` by Espressif Systems.
 > poate injecta date, dezinrola o placa sau inrola una falsa. Este o
 > masura temporara; ultima versiune cu cifru este commit-ul `a710142`.
 
-## Cum se ruleaza
+## Ce face la pornire
 
-1. Serial Monitor la **115200** baud.
-2. Terminator de linie: **Newline** (sau *Both NL & CR*).
-3. Se scrie cifra testului dorit, sau o comanda, si se apasa Enter.
+```
+Leds -> SpiBus -> DeviceRegistry (NVS) -> HubIdentity (NVS)
+     -> SensorLink (LoRa ASCULTA) -> NetLink (DHCP) -> HubCloud
+```
 
-| Tasta | Test |
-|-------|------|
-| 1 | Butoane (GPIO34 / GPIO35) |
-| 2 | Diagnostic SPI ENC28J60 |
-| 3 | Ethernet: DHCP + internet |
-| 4 | LoRa: emisie |
-| 5 | LoRa: receptie |
-| 6 | Coexistenta LoRa + Ethernet |
-| 7 | Senzor: receptie temperatura **in clar** |
-| 8 | **Pairing: inrolare + date** |
-| 0 | Opreste testul curent |
-| m | Reafiseaza meniul |
+Ordinea nu este intamplatoare. **Radioul porneste inaintea retelei si
+esecul retelei nu opreste nimic:** legatura cu senzorii este produsul,
+cloud-ul este un canal de raportare peste ea. Un hub fara cablu de retea
+trebuie sa poata fi pus in functiune pe teren.
 
-Ordinea recomandata la o placa noua: **2 → 3 → 4/5 → 6 → 8**.
+Dupa aceea, `HubCloud` parcurge singur:
 
-## Comenzi de pairing
+1. asteapta o adresa IP;
+2. `GET /api/health` — serverul este bun doar daca `"database"` este
+   `"Reachable"`; `"status": "Healthy"` singur **nu** este suficient,
+   fiindca API-ul poate raspunde perfect cu baza de date cazuta.
+   La esec reincearca, cu backoff 5 / 10 / 30 / 60 s;
+3. daca identitatea din flash este goala, `POST /api/device/provision` cu
+   parametrii de fabrica din `Config.h`; raspunsul se salveaza in NVS,
+   deci a doua pornire nu mai cere nimic.
 
-Se scriu ca text, nu ca cifre, si merg si in timpul unui test:
+Heartbeat-ul si telemetria sunt etapa urmatoare. Cele 11 valori din
+`config` primite de la server **se salveaza, dar inca nu se folosesc**.
+
+## Comenzi
+
+Se scriu ca text si se termina cu Enter (Serial Monitor la **115200**,
+terminator **Newline**).
 
 | Comanda | Ce face |
 |---------|---------|
-| `pair` | Deschide fereastra de inrolare (porneste testul 8 daca nu ruleaza). LED 2 clipeste cat timp fereastra e deschisa. |
-| `sensors` | **Tabelul retelei:** toate cele `HUB_MAX_SENSORS` locuri, in ordinea numerelor, cu ultima temperatura, de cat timp nu s-a mai auzit fiecare, RSSI, pachete primite si pachete pierdute. Locurile libere sunt aratate ca atare |
+| `pair` | Deschide fereastra de inrolare. LED 2 clipeste cat timp e deschisa |
+| `sensors` | **Tabelul retelei:** toate locurile, cu ultima temperatura, vechimea ei, RSSI, pachete primite si pierdute |
 | `list` | Senzorii inrolati, din registrul salvat in NVS |
-| `provisioned` | Senzorii care **au voie** sa se inroleze (lista din `Config.h`), cu numarul fiecaruia |
-| `remove <DevEUI>` | Il scoate din retea. Primeste `CMD_DOWN(RESET)` la **fiecare** pachet al lui, iar inregistrarea dispare abia dupa ce senzorul **tace** `REMOVE_CONFIRM_SILENCE_MS` — tacerea e dovada ca a primit comanda (F-031). Refuzat daca senzorul nu a trimis niciodata nimic. |
-| `remove #3` | Acelasi lucru, dar dupa **numarul** senzorului |
-| `remove <...> force` | Il sterge imediat din registru, fara sa il anunte. Senzorul se crede in continuare inrolat si continua sa emita; recuperarea se face de la butonul 2 al senzorului |
-| `stats` | Contoarele testului de pairing, apoi tabelul `sensors` |
+| `provisioned` | Senzorii care **au voie** sa se inroleze (lista din `Config.h`) |
+| `remove <DevEUI>` | Il scoate din retea. Primeste `CMD_DOWN(RESET)` la **fiecare** pachet al lui, iar inregistrarea dispare abia dupa ce senzorul **tace** `REMOVE_CONFIRM_SILENCE_MS` (F-031). Refuzat daca senzorul nu a trimis niciodata nimic |
+| `remove #3` | Acelasi lucru, dupa **numarul** senzorului |
+| `remove <...> force` | Il sterge imediat din registru, fara sa il anunte. Recuperarea se face de la butonul 2 al senzorului |
+| `stats` | Contoarele legaturii radio, apoi tabelul `sensors` |
+| `net` | Transport, IP, reinnoiri DHCP, conexiuni TCP deschise/inchise. Reincearca DHCP daca legatura e jos |
+| `hub` | Identitatea hub-ului. `apiKey` **mascat**, `provisioningSecret` deloc |
+| `cloud` | Starea bootstrap-ului: ultimul status HTTP, ultima sanatate, esecuri, urmatoarea reincercare |
+| `health` | Verifica acum serverul si baza de date |
+| `provision` | Cere acum provisioning-ul. **Refuza daca e deja provizionat** |
+| `forget yes` | Sterge identitatea din flash. `forget` gol doar avertizeaza. Senzorii **nu** sunt afectati |
+| `mem` | Heap liber si minimul atins de la pornire |
+| `reboot` | Salveaza registrul si reporneste |
 | `help` | Lista aceasta |
 
 `DevEUI` se scrie ca 16 cifre hexazecimale, de exemplu
@@ -69,8 +88,26 @@ Se scriu ca text, nu ca cifre, si merg si in timpul unui test:
 Numarul senzorului se scrie ca `#3` sau ca `3`.
 
 **Butonul 1 (GPIO34)** deschide si el fereastra de pairing, ca sa nu fie
-nevoie de un calculator langa hub. Este ascultat doar cand nu ruleaza
-niciun test sau cand ruleaza chiar testul 8.
+nevoie de un calculator langa hub.
+
+## Regula care guverneaza tot ce se adauga in `loop()`
+
+Senzorul isi deschide fereastra de receptie **imediat** dupa ce a emis si
+o tine deschisa doar `DOWNLINK_WINDOW_MS` = 600 ms. In plus,
+`LoRa.parsePacket()` pune modemul in **RX_SINGLE**, care expira dupa
+~102 ms.
+
+Prin urmare orice lucru lung pus in `loop()` **nu intarzie receptia, ci o
+distruge**: pachetele nu se acumuleaza nicaieri. De aceea:
+
+- consola citeste **un octet per apel**, nu cu `readStringUntil()`, care
+  ar bloca o secunda intreaga daca terminalul e pe „No line ending";
+- `HubCloud` si `NetLink::maintain()` trec prin doua porti: nu pornesc
+  nimic cat timp un senzor tocmai a vorbit (`HTTP_QUIET_AFTER_RX_MS`),
+  si nici cat timp o dezinrolare asteapta confirmare;
+- `Ethernet.begin()` primeste timeouts mici (8 s / 2 s), fiindca
+  `Ethernet.maintain()` le refoloseste la reinnoirea lease-ului, unde
+  schimbul DHCP este **blocant**.
 
 ## Reteaua: pana la 5 senzori, fiecare cu numarul lui
 
@@ -150,8 +187,9 @@ exact a uneia trece neobservata.
    Daca nu se potriveste, join-ul esueaza vizibil, cu trei clipiri pe
    LED2 — diagnosticul care a inlocuit sirul de "MIC gresit".
 5. De aici incolo, temperatura vine ca `DATA_UP`, in clar. Payload-ul
-   este **exact acelasi pachet de 6 octeti** ca la testul 7 si trece prin
-   acelasi `SensorPacketCodec::decode()`.
+   este **exact acelasi pachet de 6 octeti** pe care il emite un senzor
+   neinrolat, si trece prin acelasi `SensorPacketCodec::decode()`: nu
+   exista doua cai de interpretare a temperaturii.
 
 Un senzor **neprovizionat** (DevEUI absent din `Config.h`) este refuzat
 cu mesaj explicit. Un `DATA_UP` rejucat este respins si numarat separat

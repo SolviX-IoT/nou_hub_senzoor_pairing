@@ -61,6 +61,28 @@ namespace SpiBus {
 
   // Reset hardware al SX1276 (puls LOW pe PIN_LORA_RST).
   void resetLoRaModule();
+
+  // -------------------------------------------------------------------
+  // Cine detine magistrala - ASSERT DE DEPANARE, nu lacat
+  // -------------------------------------------------------------------
+  // claimEthernet() si claimLoRa() nu impun nimic: amandoua doar ridica
+  // ambele CS-uri, iar coborarea CS-ului o face fiecare biblioteca din
+  // propriul cod, in propria tranzactie SPI. Ca preconditie ("nimeni nu
+  // este selectat inainte sa incepi") sunt corecte si suficiente; ca
+  // invariant nu sunt nimic.
+  //
+  // Flag-ul de mai jos nu schimba asta. Retine doar cine a cerut ultima
+  // data magistrala si, sub SPI_BUS_ASSERT, se plange daca celalalt
+  // modul o cere fara ca primul sa o fi eliberat. Prinde exact greseala
+  // pe care o face codul de retea: un deselectAll() uitat pe o cale de
+  // return timpuriu, dupa care urmatorul apel LoRa merge cu Ethernet-ul
+  // inca "proprietar".
+  //
+  // NU se transforma in mutex. Programul are un singur fir; un lacat ar
+  // transforma o eroare de proiectare intr-un blocaj care nu se poate
+  // depana pe Serial.
+  enum class Owner : uint8_t { None, Ethernet, LoRa };
+  Owner owner();
 }
 
 /*

@@ -29,8 +29,8 @@ contoarele — **nu un control de acces**.
 | Senzor | PIC16LF1508 + RFM96 (SX1276) + NTC 10K 3950 | MPLAB X, XC8 v3.10, drivere MCC Melody |
 | Hub | ESP32 Dev Module + RFM96 (SX1276) + ENC28J60 | Arduino IDE, placa *ESP32 Dev Module* |
 
-Librarii necesare pe hub: **EthernetENC** (Juraj Andrassy) si **LoRa**
-(Sandeep Mistry).
+Librarii necesare pe hub: **EthernetENC** (Juraj Andrassy), **LoRa**
+(Sandeep Mistry) si **ArduinoJson v7** (Benoit Blanchon).
 
 ---
 
@@ -74,7 +74,65 @@ valori** ale lui `SENSOR_NODE_ID`.
 
 **Hub:** sketch-ul compileaza pentru ESP32 Dev Module fara erori si fara
 warning-uri proprii (cele ramase sunt din `EthernetENC` si `LoRa`) si ocupa
-**351 kB din 1310 kB** de flash.
+**356 kB din 1310 kB** de flash, cu **25,6 kB** de RAM global.
+
+Cifra era 351 kB inainte de 2026-09-01. Stergerea celor sapte teste (F-039) a
+dat inapoi ~26 kB, iar `ArduinoJson` plus modulele noi de retea au adaugat
+~31 kB: net, aproape neutru.
+
+> **Atentie la WiFi, cand va veni.** Stiva ESP32 de WiFi adauga 350–500 kB si
+> ar duce sketch-ul pe la 800–900 kB. Incape in 1310 kB, dar **inchide usa
+> OTA**: o schema cu doua partitii de aplicatie da fiecareia ~640 kB, si 900
+> nu intra. Iar `autoFirmwareUpdate` este un camp pe care serverul chiar il
+> trimite in `config`. **Schema de partitii se decide inainte de WiFi, nu
+> dupa.**
+
+---
+
+## Hub-ul in cloud — ce este adevarat acum
+
+Hub-ul porneste singur, asculta senzorii, isi ia adresa prin DHCP si se
+provizioneaza la `http://84.117.97.136:7039`. Doi pasi, in ordine:
+
+1. `GET /api/health` cu antetul `X-Solvix-AdminKey`. **Sanatatea se judeca
+   dupa campul `database` = `Reachable`**, nu dupa `status`: API-ul poate
+   raspunde perfect cu baza de date cazuta. La esec: backoff 5 / 10 / 30 / 60 s,
+   apoi 60 s la nesfarsit.
+2. `POST /api/device/provision` cu `deviceUid`, `serialNumber`,
+   `provisioningSecret` si `firmwareVersion` din `Config.h`. Raspunsul —
+   `hubGuid`, `apiKey`, `pairingCode`, `lifecycleStatus`, `provisionedAt`,
+   `maxSensors` si cele 11 valori de `config` — se salveaza in NVS
+   (`solvix-hub`, separat de registrul senzorilor). **A doua pornire nu mai
+   cere nimic.**
+
+**Masurat cu `curl` la 2026-09-01, si ambele lucruri conteaza (F-042):**
+- serverul raspunde `Transfer-Encoding: chunked`, **fara** `Content-Length`,
+  deci de-chunker-ul din `Http.cpp` este obligatoriu, nu o precautie;
+- `X-Solvix-AdminKey` **nu** este ceruta la `/api/device/provision`: aceeasi
+  cerere cu si fara ea primeste acelasi 401 de provisioning. Se trimite
+  totusi, `CLOUD_PROVISION_SENDS_ADMIN_KEY` = 1; trecerea pe 0 este sigura si
+  ar scoate cheia globala din fiecare hub din teren.
+
+**Cele 11 valori de `config` se salveaza, dar NU se folosesc inca.** Heartbeat
+si telemetrie sunt etapa urmatoare; carligul este `SensorLink::onReading()`,
+inca neinregistrat. La fel `maxSensors` de la server: se salveaza, se compara
+cu `HUB_MAX_SENSORS` si se anunta nepotrivirea, dar valoarea locala ramane cea
+care dimensioneaza registrul.
+
+**Stare la 2026-09-01, prima rulare cu serverul real:** reteaua, DHCP-ul,
+HTTP-ul si parsarea merg cap-coada — `GET /api/health` intoarce 200 in ~300 ms
+si se citeste corect. Provisioning-ul insa primeste **429, "prea multe
+incercari esuate pentru acest device"**: serverul a limitat acest `deviceUid`
+dupa esecuri anterioare. Hub-ul asteapta acum 15 minute intre incercari
+(sau cat cere `Retry-After`) si se opreste de tot dupa 5 esecuri consecutive,
+in loc sa reincerce la fiecare 11 secunde si sa-si intretina singur blocajul
+(F-043). **Cauza esecurilor de dinainte de limitare nu este inca stabilita** —
+se va vedea la prima incercare de dupa expirarea ferestrei.
+
+**Ce nu s-a confirmat inca la backend:** este `/api/device/provision`
+idempotent pentru un `deviceUid` deja cunoscut? De raspunsul asta depinde daca
+`IDENTITY_BLOB_VERSION` are voie sa creasca vreodata si daca `forget yes` este
+o operatie sigura. Pana atunci, codul nu re-provizioneaza niciodata singur.
 
 ---
 
@@ -88,6 +146,7 @@ warning-uri proprii (cele ramase sunt din `EthernetENC` si `LoRa`) si ocupa
 | `HUB_MAX_SENSORS` | **5** | `hub/SolvixHub_Tests/Config.h` |
 | `REMOVE_CONFIRM_SILENCE_MS` | **180000** (180 s) | `hub/SolvixHub_Tests/Config.h` |
 | `SENSOR_OFFLINE_MS` | **150000** (150 s) | `hub/SolvixHub_Tests/Config.h` |
+| `IDENTITY_BLOB_VERSION` | **1** | `hub/SolvixHub_Tests/Config.h` |
 
 Lungimile pachetelor, **distincte si obligatoriu asa**: TEMP_PLAIN 6 ·
 JOIN_REQ 10 · JOIN_ACCEPT 3 · DATA_UP 13 · CMD_DOWN 4.

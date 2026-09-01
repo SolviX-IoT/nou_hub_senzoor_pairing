@@ -283,4 +283,189 @@ extern byte HUB_MAC[6];
 // ca sa ramana adevarata regula "constantele traiesc in Config.h".
 #define PROVISIONED_DEVICES_INIT {   /* #1 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x01 } },            /* #2 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x02 } },            /* #3 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x03 } },            /* #4 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x04 } },            /* #5 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x05 } },          }
 
+
+// =====================================================================
+// RETEAUA
+// =====================================================================
+// Hub-ul are nevoie de o singura cale spre exterior la un moment dat.
+// Astazi este Ethernet; WiFi urmeaza. Comutatorul de mai jos alege ce se
+// compileaza in NetLink.cpp.
+//
+// De ce un comutator de compilare si nu o clasa abstracta cu doua
+// implementari: pe un aparat care are exact un transport, polimorfismul
+// la rulare costa o tabela virtuala si o indirectare la fiecare apel si
+// nu cumpara nimic. Cusatura de care chiar este nevoie este mai sus, la
+// nivelul HTTP: NetLink::acquireClient() intoarce un Client*, iar
+// EthernetClient si WiFiClient deriva amandoua din Client. Codul care
+// face cereri nu afla niciodata pe ce transport merge - si, mai
+// important, nici pe ce magistrala.
+#define HUB_NET_ETHERNET   0
+#define HUB_NET_WIFI       1
+#define HUB_NET_TRANSPORT  HUB_NET_ETHERNET
+
+// Cat se asteapta un IP de la serverul DHCP, si cat se asteapta fiecare
+// raspuns in parte.
+//
+// AL DOILEA PARAMETRU NU ESTE COSMETIC. Ethernet.maintain(), chemata
+// periodic ca sa reinnoiasca lease-ul, face la expirarea lui T1 un
+// schimb DHCP BLOCANT, marginit exact de valorile date aici lui
+// Ethernet.begin(). Cu vechea valoare de 15000 ms si niciun timeout de
+// raspuns, o reinnoire putea bloca hub-ul cincisprezece secunde - la
+// zile dupa pornire, fara niciun avertisment, si peste ~25 de ferestre
+// de downlink. 8 s / 2 s marginesc cazul cel mai rau la ceva ce se poate
+// suporta si, mai ales, la ceva CUNOSCUT.
+#define ETH_DHCP_TIMEOUT_MS     8000UL
+#define ETH_DHCP_RESPONSE_MS    2000UL
+
+// Cat de des se cheama Ethernet.maintain(). Lease-urile DHCP se masoara
+// in ore; o data pe secunda este deja de mii de ori mai des decat e
+// nevoie, si tine costul in loop() la zero cand nu e nimic de facut.
+#define ETH_MAINTAIN_EVERY_MS   1000UL
+
+// Peste cat timp o singura chemare a lui Ethernet.maintain() este
+// considerata anormala si se raporteaza pe Serial, cu durata.
+// Masuram, nu presupunem: daca reinnoirea DHCP chiar blocheaza, vrem
+// linia aceea in jurnal prima data cand se intampla pe hardware real.
+#define ETH_MAINTAIN_WARN_MS    200UL
+
+// 1 = SpiBus tine minte cine a cerut ultima data magistrala si se plange
+//     daca celalalt modul o cere fara ca primul sa fi eliberat-o.
+//
+// NU este un lacat si nu poate impiedica nimic: bibliotecile isi coboara
+// singure CS-ul, din propriul cod. Este un assert, si prinde exact clasa
+// de greseala pe care o face codul nou de retea - un deselectAll() uitat
+// pe o cale de return timpuriu. Se lasa pe 1 cat timp se lucreaza la
+// retea; costa un octet de stare si un test compilat conditionat.
+#define SPI_BUS_ASSERT          1
+
+// =====================================================================
+// CLOUD - identitatea hub-ului si API-ul
+// =====================================================================
+// PASUL 1 din diagrama de pornire: parametrii de fabrica, compilati in
+// firmware. Ei nu se schimba niciodata la rulare si nu se salveaza in
+// NVS - sunt identitatea placii, nu o stare a ei.
+#define HUB_ID                    4
+#define HUB_DEVICE_UID            "fa2c305b-f0e8-49a8-9985-633c47914d70"
+#define HUB_SERIAL_NUMBER         "PrimaV3HUB2026"
+#define HUB_PROVISIONING_SECRET   "kiJaXUxD-ngzOITvJQFnWegjo66Gw3sFvz8XdAnVI2k"
+
+// Versiunea de firmware. Se trimite la provisioning SI se afiseaza in
+// bannerul de pornire, dintr-un singur loc: doua literale identice in
+// doua fisiere se desincronizeaza la prima modificare.
+#define HUB_FIRMWARE_VERSION      "1.0.1"
+
+// Serverul. Adresa este un IP brut, deci NU este nevoie de DNS - se
+// economisesc si rezolvarea, si esecul ei ca mod de defectare.
+#define CLOUD_HOST_IP_0           84
+#define CLOUD_HOST_IP_1           117
+#define CLOUD_HOST_IP_2           97
+#define CLOUD_HOST_IP_3           136
+#define CLOUD_PORT                7039
+
+// Antetul de autentificare comun.
+#define CLOUD_ADMIN_KEY_HEADER    "X-Solvix-AdminKey"
+#define CLOUD_ADMIN_KEY           "bli009t664p53JZYeRJ8y5cjoe9J2MK1E8BJTAXE7aWr"
+
+// MASURAT: serverul raspunde cu "Transfer-Encoding: chunked", FARA
+// Content-Length (Kestrel). De-chunker-ul din Http.cpp nu este deci o
+// precautie teoretica - fara el, ArduinoJson ar primi antetul de chunk
+// lipit de JSON, ar da InvalidInput la fiecare cerere, iar hub-ul ar
+// raporta la nesfarsit "baza de date nu raspunde" cu un server sanatos.
+#define CLOUD_PATH_HEALTH         "/api/health"
+#define CLOUD_PATH_PROVISION      "/api/device/provision"
+
+// 1 = se trimite X-Solvix-AdminKey si la POST /api/device/provision.
+//
+// MASURAT LA 2026-09-01, si rezultatul spune ca NU este ceruta: aceeasi
+// cerere cu un deviceUid inexistent, trimisa o data cu cheia de admin si
+// o data fara ea, a primit de ambele dati exact acelasi raspuns -
+// 401 cu mesajul de PROVISIONING ("Identitatea trimisa nu este valida
+// sau device-ul nu poate fi provisionat"), nu o eroare generica de
+// autentificare. Cu alte cuvinte cererea a ajuns la handler in ambele
+// cazuri, deci cheia nu este verificata acolo; credentialul care conteaza
+// este provisioningSecret, cel per device.
+//
+// Ramane pe 1 fiindca asa s-a decis si fiindca nu strica. Trecerea pe 0
+// este insa o singura linie, si are un castig real: cheia globala de
+// admin nu ar mai ajunge in fiecare hub din teren, de unde oricine tine
+// placa in mana o poate scoate cu esptool read_flash.
+#define CLOUD_PROVISION_SENDS_ADMIN_KEY 1
+
+// Cat de mare poate fi corpul unui raspuns. Raspunsul de provisioning
+// are ~700 de octeti; 1536 lasa loc de crestere si ramane un tampon
+// static rezonabil in .bss.
+#define CLOUD_BODY_MAX            1536
+
+// Cat asteapta o conexiune TCP sa se stabileasca.
+//
+// EthernetENC are implicit 5000 ms si NU are connect neblocant. Fara
+// valoarea de aici, fiecare incercare catre o ruta moarta ar costa cinci
+// secunde intregi, in care hub-ul este surd.
+#define HTTP_CONNECT_TIMEOUT_MS   1200UL
+
+// Bugetul total al unei cereri, din momentul in care incepe pana cand se
+// renunta: conectare, trimitere, citirea raspunsului.
+#define HTTP_BUDGET_MS            2500UL
+
+// Cat timp dupa ultimul pachet auzit pe radio NU se porneste nicio
+// cerere de retea.
+//
+// Senzorul isi tine fereastra de downlink deschisa 600 ms de la sfarsitul
+// propriei transmisii - singura ocazie in care hub-ul poate sa ii
+// raspunda. O cerere HTTP pornita fix atunci ii mananca fereastra.
+// O secunda acopera fereastra cu marja si costa doar o intarziere de un
+// ciclu a bootstrap-ului, care oricum nu se grabeste.
+#define HTTP_QUIET_AFTER_RX_MS    1000UL
+
+// Cat se asteapta intre incercarile de a ajunge la server, in secunde.
+// Ultima valoare se repeta la nesfarsit.
+//
+// Nu este plat la 60 s dinadins: un hub care porneste cu trei secunde
+// inaintea switch-ului nu are de ce sa stea un minut degeaba, iar un
+// server care chiar este cazut nu merita interogat des.
+#define CLOUD_RETRY_BACKOFF_S     { 5UL, 10UL, 30UL, 60UL }
+
+// Cat asteapta hub-ul dupa un 429 ("prea multe cereri"), daca serverul
+// nu trimite un antet Retry-After.
+//
+// UN 429 NU ESTE O EROARE CA CELELALTE. Celelalte esecuri sunt
+// independente intre ele: reincerci si poate merge. Un 429 spune ca
+// TOCMAI REINCERCARILE sunt problema, deci fiecare incercare in plus
+// hraneste exact contorul care tine usa inchisa. Reincercarea deasa nu
+// scurteaza pedeapsa, o prelungeste.
+//
+// De aici si valoarea mare, si faptul ca este separata de backoff-ul
+// obisnuit: 15 minute inseamna patru incercari pe ora, adica destul de
+// rar cat sa se stinga orice fereastra rezonabila de rate limiting.
+#define CLOUD_RATELIMIT_COOLDOWN_MS  900000UL
+
+// Dupa cate esecuri CONSECUTIVE de provisioning hub-ul se opreste din
+// incercat si intra in starea Blocked.
+//
+// Un provisioning care esueaza de cinci ori la rand nu se repara de la
+// sine: ori secretul nu este bun, ori device-ul este deja inregistrat,
+// ori serverul ne-a inchis usa. In toate cazurile mai trebuie un om.
+// Hub-ul spune ce a incercat si se opreste; `provision` il porneste din
+// nou dupa ce s-a lamurit cauza. Radioul ramane pornit tot timpul.
+#define CLOUD_PROVISION_MAX_ATTEMPTS 5
+
+// La cat timp se reaminteste pe Serial ca hub-ul inca nu e provizionat.
+#define CLOUD_NAG_EVERY_MS        600000UL
+
+// Spatiul NVS pentru identitatea hub-ului. SEPARAT de "solvix-pair", al
+// registrului de senzori: cele doua se versioneaza independent, iar o
+// stergere a unuia nu are voie sa il atinga pe celalalt.
+// Maximum 15 caractere, asa cere NVS.
+#define IDENTITY_NVS_NAMESPACE    "solvix-hub"
+
+// Versiunea structurii salvate. Ca la REGISTRY_BLOB_VERSION, o valoare
+// diferita face ca ce e in NVS sa fie ignorat.
+//
+// ATENTIE, PRETUL ESTE ALTUL AICI: un hub care porneste neprovizionat
+// cere din nou /api/device/provision pentru acelasi deviceUid. Daca
+// endpoint-ul NU este idempotent, asta inseamna un hub nou pe server si
+// istoricul vechi orfan. De confirmat cu backend-ul inainte de a creste
+// vreodata numarul.
+#define IDENTITY_BLOB_VERSION     1
+
 #endif // CONFIG_H

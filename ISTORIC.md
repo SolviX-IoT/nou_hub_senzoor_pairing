@@ -123,6 +123,10 @@ doar prin modulul `Leds`, si nu se apeleaza niciodata `LoRa.end()` /
 | 2026-08-26 | F-034 | Somn intre transmisii pe senzor |
 | 2026-08-26 | F-035…F-037 | Pana la 5 senzori pe acelasi hub |
 | 2026-08-29 | F-038 | Criptografia scoasa, pairing-ul pastrat |
+| 2026-09-01 | F-039…F-042 | Hub-ul nu mai este o suita de teste: runtime permanent, retea la pornire si bootstrap in cloud (health + provisioning) |
+| 2026-09-01 | F-043 | Prima rulare cu serverul real: backoff-ul nu crestea si hub-ul isi intretinea singur blocajul de rate limiting |
+| 2026-09-01 | F-044 | Campurile identitatii, dimensionate din estimare: lifecycleStatus nu incapea cu un caracter |
+| 2026-09-01 | F-045 | Consola neblocanta nu executa nicio comanda pe "No line ending" - regresie din F-040 |
 
 ### 2.1. 2026-08-26 — TPL5110 scos din proiectare *(fara eticheta F)*
 
@@ -147,7 +151,7 @@ Castigul de memorie este cel asteptat de la trei scrieri de registre:
 
 ---
 
-## 3. Catalogul F-001 … F-038
+## 3. Catalogul F-001 … F-045
 
 Fiecare intrare spune **simptomul**, **cauza** si **fixul**, ca sa nu se repete
 aceleasi greseli.
@@ -417,6 +421,253 @@ aceleasi greseli.
 
 ---
 
+### F-039 — Produsul traia intr-un test, si nimic nu rula fara un om la tastatura
+- **Simptom:** hub-ul nu facea nimic la pornire. Inrolarea senzorilor si
+  receptia temperaturilor — adica tot ce inseamna produsul — traiau in
+  „testul 8" si porneau doar daca cineva tasta `8` in Serial Monitor.
+  Ethernet-ul se ridica doar in interiorul testului 3 sau 6, deci pe un
+  hub lasat singur nu exista nici retea.
+- **Cauza:** structura era mostenita din faza de bring-up hardware, cand
+  chiar asta se voia: un meniu din care se incearca un modul o data.
+  Functionalitatea a crescut inauntrul ei in loc sa o inlocuiasca.
+- **Fix:** cele sapte teste au fost **sterse** (`TestButtons`,
+  `TestEncSpi`, `TestEthernet`, `TestLoRaTx`, `TestLoRaRx`,
+  `TestCoexistence`, `TestSensorRx`), structura `Test` odata cu ele.
+  `TestPairing.*` a devenit `SensorLink.*` si porneste din `setup()`;
+  `TestBase.*` a devenit `Console.*` si a pastrat doar cele trei ajutoare
+  de afisare; `EthernetLink.*` a devenit `NetLink.*`.
+- **Ordinea din `setup()` este o decizie, nu o intamplare:** radioul
+  porneste **inaintea** retelei si un esec de DHCP **nu opreste boot-ul**.
+  Legatura cu senzorii este produsul; cloud-ul este un canal de raportare
+  peste ea. Un hub fara cablu trebuie sa poata fi pus in functiune pe
+  teren, altfel comisionarea depinde de un router.
+- **De retinut:** cand functionalitatea reala ajunge sa fie „unul dintre
+  teste", schela a devenit cladire. Ce se pierde nu este eleganta, ci
+  faptul ca aparatul nu porneste singur.
+
+### F-040 — Trei lucruri blocante in `loop()`, si de ce toate trei conteaza mai mult decat par
+- **Simptom (prins la proiectare, inainte de a adauga reteaua):** hub-ul
+  ar fi inceput sa piarda pachete si ACK-uri fara nicio eroare vizibila,
+  in momente care nu se leaga de nimic — o tasta apasata, o reinnoire de
+  lease, o cerere catre cloud.
+- **Cauza, si cifra care schimba totul:** `LoRa.parsePacket()` din
+  libraria Sandeep Mistry pune modemul in **RX_SINGLE**, nu in RX
+  continuu. `RegSymbTimeout` are valoarea de reset 0x64 = 100 de
+  simboluri, adica **~102 ms** la SF7/BW125. Dupa atat, modemul cade in
+  standby. Prin urmare o blocare in `loop()` **nu intarzie receptia, o
+  distruge**: pachetele nu se acumuleaza nicaieri, nu exista niciun FIFO
+  care sa le tina. Peste asta se aduna fereastra de downlink a senzorului,
+  care are 600 ms si este singura ocazie in care hub-ul poate raspunde.
+
+  Cele trei blocari gasite:
+  1. `Serial.readStringUntil('\n')` in consola — asteapta pana la
+     `Stream::_timeout`, adica **o secunda**, daca terminalul este pe „No
+     line ending". O secunda de surzenie, declansata de o tasta;
+  2. `Ethernet.begin(HUB_MAC, 15000)` fara timeout de raspuns —
+     `Ethernet.maintain()` **refoloseste** acele valori la reinnoirea
+     lease-ului, iar acolo schimbul DHCP este blocant. Cincisprezece
+     secunde, la zile dupa pornire, fara niciun avertisment;
+  3. cererile HTTP, care sunt blocante prin proiectare.
+- **Fix, cate unul pentru fiecare:**
+  1. `SerialConsole::tick()` citeste **un octet per apel** intr-un
+     `char[96]` si executa la Enter;
+  2. `Ethernet.begin(HUB_MAC, 8000, 2000)`, `maintain()` limitat la o
+     data pe secunda si **cronometrat** — peste `ETH_MAINTAIN_WARN_MS` =
+     200 ms se scrie pe Serial cu durata, fiindca aici se masoara, nu se
+     presupune;
+  3. doua porti in `HubCloud::tick()`: nu se porneste nimic cat timp
+     `millis() - SensorLink::lastRxMs() < HTTP_QUIET_AFTER_RX_MS`
+     (fereastra de downlink tocmai deschisa), si nici cat timp
+     `SensorLink::hasPendingRemoval()` (un RESET care isi asteapta
+     fereastra, F-031).
+  In plus, ACK-ul a fost mutat **inaintea** blocului de log din
+  `handleData()`: linia de ~110 caractere costa ~9,5 ms la 115200 baud,
+  cheltuiti din interiorul ferestrei degeaba.
+- **De ce cererile HTTP au ramas totusi blocante:** `EthernetClient` din
+  EthernetENC nu are `connect()` neblocant, deci o masina de stari ar fi
+  pastrat oricum o gaura de peste o secunda; iar o sesiune intinsa pe mai
+  multe `tick()`-uri ar lasa LoRa sa vorbeasca in mijlocul unui transfer
+  Ethernet pe magistrala partajata. Costul masurat: ~4% surzenie, si numai
+  cat timp cloud-ul este cazut. Pierderile se vad in coloana `pierd.`.
+- **De retinut:** inainte de a pune ceva nou in `loop()`, intreaba cat
+  blocheaza si compara cu 102 ms, nu cu „pare rapid".
+
+### F-041 — `claimEthernet()` si `claimLoRa()` sunt aceeasi functie
+- **Simptom:** niciunul inca — de aceea intrarea exista.
+- **Cauza:** cele doua functii au corpuri identice: amandoua ridica
+  ambele CS-uri. Ca **preconditie** („nimeni nu este selectat inainte sa
+  incepi") sunt corecte si suficiente, fiindca fiecare biblioteca isi
+  coboara singura CS-ul in propria tranzactie SPI. Ca **invariant** nu
+  impun nimic: nimic nu impiedica un cod care uita `deselectAll()` pe o
+  cale de eroare sa lase celalalt modul sa vorbeasca peste el.
+- **Fix:** `SpiBus::Owner` — un flag care retine cine a cerut ultima data
+  magistrala, plus un avertisment sub `SPI_BUS_ASSERT` (implicit 1) cand
+  un modul o cere fara ca celalalt sa o fi eliberat. Se plange **o
+  singura data per tranzitie gresita**, ca sa nu inece Serial-ul si sa
+  devina el insusi o problema de temporizare. In plus, rezervarea SPI a
+  fost stransa intr-un singur loc: `NetLink::acquireClient()` /
+  `releaseClient()`, deci `Http` nu atinge niciodata `SpiBus`.
+- **Ce NU s-a facut, dinadins:** un mutex. Programul are un singur fir de
+  executie; un lacat ar transforma o eroare de proiectare intr-un blocaj
+  care nu se poate depana pe Serial. Ramane valabil cat timp nimeni nu
+  adauga un task FreeRTOS — in ziua aceea, discutia se redeschide.
+
+### F-042 — Serverul raspunde `chunked`, si fara de-chunker hub-ul ar fi raportat la nesfarsit „baza de date nu raspunde"
+- **Simptom (prins prin masurare, inainte de a ajunge pe placa):** cu un
+  server perfect sanatos, hub-ul ar fi raportat la fiecare incercare
+  „JSON invalid" sau „baza de date nu raspunde", si ar fi ramas
+  neprovizionat pentru totdeauna. Nicio eroare de retea, niciun timeout —
+  cererea reuseste, raspunsul vine, si totusi nu merge.
+- **Cauza:** `GET http://84.117.97.136:7039/api/health` raspunde cu
+  `Transfer-Encoding: chunked` si **fara** `Content-Length` — Kestrel
+  emite chunked ori de cate ori nu stie lungimea din start. Un cititor
+  care ignora codarea da lui ArduinoJson octetii `52\r\n{"status":...`,
+  adica antetul de chunk lipit de JSON, si primeste `InvalidInput`.
+- **Fix:** de-chunker in `Http.cpp`, ~25 de linii: lungimea in
+  hexazecimal, atatia octeti, CRLF, pana la chunk-ul de lungime zero.
+- **Cum s-a prins:** cu `curl -i` catre endpoint-ul real, inainte de
+  prima programare a placii. Antetele raspunsului sunt cinci secunde de
+  verificat si scutesc o zi de cautat un bug care arata ca o problema de
+  retea si nu este.
+- **A doua masuratoare din aceeasi sesiune:** aceeasi cerere de
+  provisioning trimisa cu si fara `X-Solvix-AdminKey`, cu un `deviceUid`
+  inexistent, a primit de ambele dati **exact acelasi** 401 cu mesajul de
+  provisioning, nu o eroare generica de autentificare. Deci cererea
+  ajunge la handler in ambele cazuri si cheia de admin nu este ceruta
+  acolo; credentialul care conteaza este `provisioningSecret`.
+  `CLOUD_PROVISION_SENDS_ADMIN_KEY` ramane pe 1, dar acum se stie ca
+  trecerea pe 0 este sigura — si ea ar scoate cheia globala de admin din
+  fiecare hub din teren, de unde oricine tine placa in mana o poate citi
+  cu `esptool read_flash`.
+- **De retinut:** un endpoint se masoara inainte de a fi implementat pe
+  microcontroler. Formatul raspunsului si regulile de autentificare sunt
+  doua intrebari la care `curl` raspunde imediat si presupunerile
+  raspund gresit.
+
+### F-043 — Un singur contor de esecuri: backoff-ul nu crestea niciodata, si hub-ul isi intretinea singur blocajul
+- **Simptom, vazut pe placa la prima rulare cu serverul real:** hub-ul
+  relua la nesfarsit acelasi ciclu, la fiecare ~11 secunde:
+  `GET /api/health` 200 -> „Server sanatos" -> `POST /api/device/provision`
+  **429** „Prea multe incercari esuate pentru acest device" ->
+  „Reincerc peste **10 s**". Mereu 10 s, niciodata 30 sau 60, desi
+  backoff-ul era scris ca 5 / 10 / 30 / 60.
+- **Cauza, doua lucruri suprapuse:**
+  1. **Un singur `s_failures` pentru doua lucruri diferite.** Verificarea
+     de sanatate reusea de fiecare data si il punea pe **0**; esecul de
+     provisioning care urma imediat il facea **1**. Deci `scheduleRetry()`
+     alegea vesnic treapta a doua, 10 secunde. Backoff-ul exista in cod si
+     nu putea creste, fiindca fiecare succes de pe o cale stergea
+     istoricul celeilalte.
+  2. **429 era tratat ca orice alt esec.** Dar un 429 nu spune „mai
+     incearca", spune „incetineste": serverul numara **incercarile
+     esuate** pentru acel device. Fiecare reincercare la 11 secunde
+     adauga inca un esec la contorul dupa care usa ramane inchisa. Hub-ul
+     nu doar ca nu iesea din blocaj, ci il **intretinea**, si nu avea nicio
+     cale sa iasa singur vreodata.
+- **Fix, trei masuri:**
+  1. **doua contoare** — `s_healthFailures` si `s_provisionFailures`. Un
+     succes pe o cale nu mai sterge istoricul celeilalte, deci backoff-ul
+     chiar creste;
+  2. **429 are tratamentul lui**: `scheduleCooldown()`, care respecta
+     antetul `Retry-After` daca serverul il trimite si altfel asteapta
+     `CLOUD_RATELIMIT_COOLDOWN_MS` = 15 minute. Se reintra **direct** in
+     `Provision`, nu prin `Health`: stim deja ca serverul e sanatos,
+     tocmai ne-a raspuns;
+  3. **oprire dupa `CLOUD_PROVISION_MAX_ATTEMPTS` = 5 esecuri
+     consecutive**, in starea `Blocked`, cu lista de verificat (device
+     deja provizionat? secret consumat? fereastra de limitare?). Radioul
+     ramane pornit — se pierde raportarea in cloud, nu produsul. Comanda
+     `provision` reia, dupa ce omul a lamurit cauza.
+- **De retinut, doua lucruri diferite:**
+  - **Un contor care serveste doua cai de esec nu masoara niciuna.**
+    Bug-ul nu se vede citind `scheduleRetry()`, care este corecta; se
+    vede doar urmarind cine mai scrie in variabila.
+  - **Reincercarea automata trebuie sa stie sa se opreasca.** Un
+    mecanism de reincercare care nu poate distinge „mai incearca" de
+    „incetineste" si nu are un capat transforma o eroare temporara intr-o
+    stare permanenta pe care o produce el insusi.
+
+### F-044 — `lifecycleStatus` avea loc pentru 16 caractere, iar prima valoare reala a serverului are 17
+- **Simptom:** provisioning-ul era refuzat de hub, nu de server. Cererea
+  reusea, raspunsul venea intreg si se parsa corect, dar se oprea la
+  scrierea identitatii, cu mesajul: campul `lifecycleStatus` are 17
+  caractere, dar incap 16.
+- **Cauza:** `char lifecycleStatus[17]` inseamna **16 caractere plus
+  terminator**, iar prima valoare pe care o trimite serverul,
+  `"PendingActivation"`, are exact **17**. Dimensiunea fusese aleasa la
+  proiectare dintr-o estimare, nu dintr-o valoare vazuta.
+- **Fix:** `lifecycleStatus` a trecut la **[31]**, adica 30 de caractere
+  utile — loc pentru nume de stare mai descriptive fara inca o
+  recompilare.
+- **A doua problema, gasita cu aceeasi ocazie si reparata odata cu ea:**
+  `provisionedAt[33]` chiar incapea, dar cu numai **4** caractere de
+  rezerva. `"2026-09-01T17:05:45.6069005Z"` are 28 — iar aceeasi data cu
+  un decalaj numeric in loc de `Z`,
+  `"2026-09-01T17:05:45.6069005+03:00"`, are **33** si nu ar mai fi
+  incaput. Serverul foloseste azi UTC, dar asta nu este garantat nicaieri,
+  iar simptomul ar fi fost identic: provisioning refuzat, cu server si
+  placa in regula amandoua. A trecut la **[41]**.
+- **Ce a functionat exact cum trebuia:** verificarea valorii intoarse de
+  `strlcpy`. Fara ea, `lifecycleStatus` s-ar fi salvat trunchiat, in
+  tacere, si ar fi fost gresit de fiecare data cand cineva s-ar fi uitat
+  la starea hub-ului. Mesajul a spus si campul, si lungimea ceruta, si
+  lungimea disponibila — adica tot ce trebuia ca fixul sa dureze un minut.
+- **Nu s-a schimbat `IDENTITY_BLOB_VERSION`, si nu era nevoie:** cele sase
+  siruri se salveaza in NVS ca **siruri** (`putString`/`getString`), nu ca
+  parte din blob. Marimea tamponului din C este o proprietate a
+  programului, nu a formatului salvat; doar `HubConfig`, singurul camp
+  scris cu `putBytes`, ar cere o incrementare. Deci niciun hub nu trebuie
+  reprovizionat din cauza acestei schimbari.
+- **De retinut:** o dimensiune de tampon aleasa „cu ochiul" pentru un camp
+  care vine prin retea este o presupunere, si trebuie tratata ca atare —
+  scrisa alaturi cu marja ei, si verificata cu valorile reale ale
+  serverului, nu cu cele imaginate. Un camp cu marja de 4 caractere este
+  un camp care va crapa.
+
+### F-045 — Consola neblocanta nu executa nicio comanda pe "No line ending"
+- **Simptom:** dupa trecerea hub-ului pe runtime permanent, **nicio
+  comanda din lista nu mai facea nimic**. Se scria `help`, `sensors`,
+  `cloud` — si nu se intampla absolut nimic. Nici macar mesajul
+  "Comanda necunoscuta", ceea ce este chiar indiciul: nu era o comanda
+  gresit scrisa sau gresit dispecerizata, ci una care **nu ajungea
+  niciodata sa fie executata**.
+- **Cauza:** `SerialConsole::tick()` a fost scrisa sa citeasca octet cu
+  octet si sa execute linia la `\n` sau `\r` (F-040). Serial Monitor are
+  insa o setare de terminator de linie, iar pe **"No line ending"** nu
+  trimite niciunul — doar caracterele comenzii. Octetii se adunau in
+  `s_line` la nesfarsit si nu se ajungea niciodata la dispecerizare.
+
+  **Este o regresie, si merita spus de ce nu s-a vazut mai devreme:**
+  varianta veche folosea `Serial.readStringUntil('\n')`, care se intoarce
+  si pe **timeout**, dupa o secunda. Adica exact defectul reparat de
+  F-040 — blocarea buclei pentru o secunda — era si lucrul care facea
+  consola sa mearga fara terminator. Inlocuindu-l, s-a pierdut tacut o
+  toleranta pe care nimeni nu o ceruse explicit si de care depindea
+  configuratia implicita a unui terminal.
+- **Fix, trei parti:**
+  1. **incheiere dupa liniste:** daca exista octeti in tampon si nu a mai
+     venit niciunul de `CONSOLE_IDLE_FLUSH_MS` = 250 ms, linia se
+     considera terminata. Valoarea vine din felul in care se poarta
+     terminalele reale: Serial Monitor trimite linia intreaga ca o
+     **rafala** cand apesi Send, deci o pauza de 250 ms inseamna sigur
+     "gata"; un terminal brut trimite caracter cu caracter, dar acolo
+     Enter trimite `\r` si terminatorul explicit rezolva oricum cazul.
+     Nu taie deci o comanda tastata rar;
+  2. **drenaj marginit:** pana la `CONSOLE_DRAIN_MAX` = 32 de octeti per
+     `tick()` in loc de unul singur. Unul singur insemna un octet la
+     ~5 ms, deci o comanda lipita din clipboard intra caracter cu
+     caracter. Cei 32 sunt deja in tamponul UART, deci citirea lor nu
+     asteapta nimic si bucla ramane neblocanta;
+  3. **se spune o data**, la prima comanda preluata fara terminator, ca
+     terminalul nu trimite unul si unde se schimba setarea. Comanda merge
+     oricum, deci nu este o eroare — este exact informatia care lipsea.
+- **De retinut:** cand inlocuiesti o functie de biblioteca cu una
+  scrisa de mana, **poarta-se identic doar in cazurile la care te-ai
+  gandit**. `readStringUntil()` avea un comportament pe timeout care nu
+  aparea in niciun comentariu si de care depindea o configuratie
+  implicita. Inainte de a scoate ceva "care doar blocheaza", intreaba ce
+  altceva mai facea acel blocaj.
+
 ## 4. Criterii de acceptanta
 
 Fotografie a ce s-a verificat, la 2026-08-29. Randurile taiate sunt cerinte
@@ -455,3 +706,12 @@ ce s-a pierdut odata cu cifrul.
 | Reprogramarea unei placi cu alt numar chiar schimba identitatea | `Nvm_LoadOrCreateProvisioning()` (F-037) |
 | Firmware-ul senzorului **incape** in PIC16LF1508 | **VERIFICAT**, cifrele in [MEMORY.md](MEMORY.md) |
 | Reteaua **nu** este autentificata | **ASUMAT EXPLICIT** (F-038) |
+| Hub-ul porneste si ruleaza **fara niciun om la tastatura** | `SensorLink::begin()` se cheama din `setup()`, nu dintr-un meniu (F-039) |
+| Un hub **fara retea** poate fi totusi pus in functiune | `NetLink::begin()` esueaza fara sa opreasca boot-ul; radioul porneste inaintea lui (F-039) |
+| Nimic din `loop()` nu tine hub-ul surd peste fereastra de downlink | consola citeste un octet per apel; `HubCloud` si `NetLink::maintain()` trec prin `lastRxMs()` si `hasPendingRemoval()` (F-040) |
+| O reinnoire DHCP blocanta se **vede**, nu doar se banuieste | `maintain()` este cronometrat si raporteaza peste `ETH_MAINTAIN_WARN_MS` (F-040) |
+| O conexiune TCP scursa se vede inainte sa lase hub-ul fara retea | `releaseClient()` face `stop()` neconditionat; comanda `net` arata deschise/inchise (F-040) |
+| Hub-ul se provizioneaza singur, o singura data | `HubCloud`: health -> provision -> NVS; a doua pornire nu mai cere nimic. Comanda `provision` refuza daca e deja facut |
+| Serverul este considerat bun doar daca **baza de date** raspunde | se compara campul `database` cu `Reachable`, nu campul `status` (F-042) |
+| O identitate scrisa pe jumatate arata ca una lipsa | versiunea se scrie ultima si se sterge prima; `isProvisioned()` cere versiune + `hubGuid` + `apiKey` |
+| Secretele nu ajung pe Serial | `apiKey` mascat, `provisioningSecret` deloc; corpul unui raspuns nevalid nu se afiseaza integral |

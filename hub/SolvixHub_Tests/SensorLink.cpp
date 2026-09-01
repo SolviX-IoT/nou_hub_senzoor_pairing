@@ -1,7 +1,7 @@
-#include "TestPairing.h"
+#include "SensorLink.h"
 
 
-namespace TestPairing {
+namespace SensorLink {
 
   // Cat timp de liniste inainte de un mesaj de semn de viata.
   static const unsigned long HEARTBEAT_MS = 15000;
@@ -40,6 +40,14 @@ namespace TestPairing {
 
   // Cate pachete de date au venit de la ultima salvare in NVS.
   static unsigned int s_sinceSave = 0;
+
+  // Momentul ultimului pachet primit pe radio, valid sau nu. Restul
+  // sistemului se uita aici inainte de a face ceva lung - vezi lastRxMs()
+  // in SensorLink.h.
+  static unsigned long s_lastRxMs = 0;
+
+  // Carligul pentru telemetrie, neinregistrat deocamdata.
+  static ReadingHandler s_readingHandler = NULL;
 
   bool isRunning()     { return s_ready; }
   bool isPairingMode() { return s_pairingMode; }
@@ -436,8 +444,8 @@ namespace TestPairing {
     }
 
     // Payload-ul este EXACT pachetul de 6 octeti al senzorului, deci il
-    // preia codul existent, neschimbat - acelasi pe care il foloseste si
-    // testul 7.
+    // preia codul existent, neschimbat: nu exista doua cai diferite de
+    // interpretare a temperaturii.
     const uint8_t* plain = data.payload;
 
     SensorPacket packet;
@@ -505,6 +513,31 @@ namespace TestPairing {
     s_dataValid++;
     Leds::pulse(PIN_LED_1);
 
+    /*
+     * ACK-ul pleaca INAINTE de blocul de afisare de mai jos, nu dupa el.
+     *
+     * Senzorul isi tine fereastra de receptie deschisa DOWNLINK_WINDOW_MS
+     * = 600 ms de la sfarsitul propriei transmisii, iar hub-ul raspundea
+     * in ~55 ms - marja este confortabila, dar linia de jurnal de mai jos
+     * are vreo 110 caractere, adica ~9,5 ms la 115200 baud, cheltuiti
+     * degeaba din interiorul ferestrei. Ordinea de aici costa zero si
+     * face loc si carligului de telemetrie de mai jos, care va creste.
+     *
+     * Dezinrolarea a fost tratata mai sus, inainte de decodare: aici
+     * ajung doar pachetele unui device sanatos.
+     */
+#if PAIRING_SEND_ACK
+    device->downCounter++;
+    sendCommand(*device, CMD_TYPE_ACK);
+#endif
+
+    // Carligul pentru telemetrie. Astazi nu este inregistrat nimeni;
+    // cand va fi, are voie DOAR sa puna intr-o coada (vezi SensorLink.h).
+    if (s_readingHandler != NULL) {
+      s_readingHandler(data.devAddr, packet.tempX100, data.frameCounter,
+                       (int16_t)rssi, packet.reason);
+    }
+
     Serial.print(F("[#"));
     Serial.print(s_dataValid);
     Serial.print(F("] "));
@@ -525,13 +558,6 @@ namespace TestPairing {
     }
     Serial.println();
 
-    // Dezinrolarea a fost tratata mai sus, inainte de decodare: aici
-    // ajung doar pachetele unui device sanatos.
-#if PAIRING_SEND_ACK
-    device->downCounter++;
-    sendCommand(*device, CMD_TYPE_ACK);
-#endif
-
     // Registrul se salveaza rar: NVS este flash, iar contorul din RAM
     // este oricum suficient pentru anti-replay intre doua salvari.
     s_sinceSave++;
@@ -542,17 +568,17 @@ namespace TestPairing {
   }
 
   // -------------------------------------------------------------------
-  // Interfata de test
+  // Interfata runtime-ului
   // -------------------------------------------------------------------
 
   bool begin() {
-    printTitle("PAIRING CRIPTAT - INROLARE SI DATE");
+    printTitle("LEGATURA CU SENZORII - INROLARE SI DATE");
     Serial.println(F("Ascult JOIN_REQ (0x10) si DATA_UP (0x12) de la nodurile senzor."));
     Serial.print(F("Reteaua are loc pentru "));
     Serial.print(HUB_MAX_SENSORS);
     Serial.println(F(" senzori; fiecare are un numar fix, dat de pozitia lui"));
     Serial.println(F("in tabelul de provisioning din Config.h."));
-    Serial.println(F("Comenzi in timpul testului: pair | sensors | list | remove <DevEUI> | stats"));
+    Serial.println(F("Comenzi: pair | sensors | list | remove <DevEUI> | stats | help"));
     printSeparator();
 
     s_ready = LoRaRadio::begin();
@@ -587,6 +613,11 @@ namespace TestPairing {
     if (LoRaRadio::receiveRaw(buffer, RX_BUFFER_SIZE, length, rssi, snr)) {
       s_lastActivity = millis();
 
+      // Orice pachet auzit, valid sau nu, inseamna ca un senzor tocmai a
+      // emis si isi tine fereastra de downlink deschisa. Marcam momentul
+      // aici, inaintea oricarei interpretari.
+      s_lastRxMs = s_lastActivity;
+
       switch (SensorPacketCodec::messageType(buffer, length)) {
         case SENSOR_MSG_JOIN_REQ:
           handleJoinRequest(buffer, length, rssi, snr);
@@ -597,11 +628,11 @@ namespace TestPairing {
           break;
 
         case SENSOR_MSG_TEMPERATURE:
-          // Un senzor care emite inca in clar: nu este o eroare, dar nu
-          // are ce cauta aici. Testul 7 este cel pentru el.
+          // Un senzor neinrolat, care emite pachetul fara adresa: nu
+          // este o eroare, dar nu poate fi atribuit nimanui.
           s_foreign++;
-          Serial.println(F("[PLAIN] Pachet de temperatura NECRIPTAT - senzorul nu este inrolat."));
-          Serial.println(F("        Pentru el foloseste testul 7, sau inroleaza-l cu 'pair'."));
+          Serial.println(F("[PLAIN] Pachet de temperatura fara adresa - senzorul nu este inrolat."));
+          Serial.println(F("        Inroleaza-l cu 'pair' plus butonul 2 tinut 3 s pe placa."));
           break;
 
         default:
@@ -638,6 +669,27 @@ namespace TestPairing {
     s_ready = false;
 
     printStats();
+  }
+
+  unsigned long lastRxMs() { return s_lastRxMs; }
+
+  void onReading(ReadingHandler handler) { s_readingHandler = handler; }
+
+  /*
+   * Exista vreo dezinrolare in curs?
+   *
+   * Cat timp raspunsul este da, singurul lucru care conteaza pe radio
+   * este ca RESET-ul sa prinda fereastra de downlink a senzorului marcat.
+   * Un `remove` care nu ajunge lasa senzorul in retea, iar registrul
+   * blocat pana la confirmare (F-031), deci restul sistemului se da la o
+   * parte pana se termina.
+   */
+  bool hasPendingRemoval() {
+    for (uint8_t i = 0; i < DeviceRegistry::count(); i++) {
+      DeviceRecord* device = DeviceRegistry::at(i);
+      if (device != NULL && device->pendingReset) return true;
+    }
+    return false;
   }
 
   void printStats() {

@@ -37,6 +37,7 @@ Placa: *ESP32 Dev Module*, din pachetul `esp32` by Espressif Systems.
 ```
 Leds -> SpiBus -> DeviceRegistry (NVS) -> HubIdentity (NVS)
      -> SensorLink (LoRa ASCULTA) -> NetLink (DHCP) -> HubCloud
+     -> HubHeartbeat
 ```
 
 Ordinea nu este intamplatoare. **Radioul porneste inaintea retelei si
@@ -55,32 +56,100 @@ Dupa aceea, `HubCloud` parcurge singur:
    parametrii de fabrica din `Config.h`; raspunsul se salveaza in NVS,
    deci a doua pornire nu mai cere nimic.
 
-Heartbeat-ul si telemetria sunt etapa urmatoare. Cele 11 valori din
-`config` primite de la server **se salveaza, dar inca nu se folosesc**.
+## Heartbeat-ul: `POST /api/device/heartbeat`
+
+Din clipa in care bootstrap-ul s-a incheiat, hub-ul bate. Ritmul vine de la
+server, in `heartbeatIntervalSeconds` din configul de provisioning; nu se
+alege aici.
+
+**Cine bate se afla dintr-un singur loc: antetul `X-Solvix-ApiKey`**, cu
+cheia per hub primita la provisioning. Corpul cererii nu contine niciun
+identificator de hub, deci fara antetul acela bataia este anonima. Cheia nu
+se afiseaza niciodata pe Serial.
+
+Se trimit douazeci de campuri, dar hub-ul poate masura onest doar opt:
+`uptimeSeconds`, `internetAvailable`, `cloudReachable`, `connectionType`,
+cele trei numere de senzori si `freeMemoryBytes` (plus `firmwareVersion` si
+`configVersion`, care se stiu). Restul — baterie de rezerva, alimentare
+principala, temperatura cipului, stocare libera, `publicIp`, RSSI de WiFi —
+sunt hardware pe care placa **nu il are**, si se trimit ca zero sau sir gol,
+cu presupunerea scrisa langa fiecare in `HubHeartbeat.cpp`. O cifra
+plauzibila si inventata ajunge intr-un grafic si e crezuta; un zero se vede
+ca zero.
+
+`onlineSensorCount` numara senzorii auziti in ultimele `SENSOR_OFFLINE_MS`.
+Un senzor inrolat dar neauzit **niciodata** in sesiunea curenta se numara la
+`offline` — altfel cele trei numere nu s-ar aduna la `sensorCount`.
+
+**Ritmul cerut de server nu este crezut pe cuvant.** Cat dureaza o cerere
+HTTP hub-ul este *surd* — nu intarziat, surd: `LoRa.parsePacket()` expira in
+~102 ms si pachetele nu se acumuleaza nicaieri. De aceea si
+`heartbeatIntervalSeconds`, si `nextHeartbeatInSeconds` din raspuns trec
+prin `HEARTBEAT_MIN_INTERVAL_S` (15 s). Tavanul,
+`HEARTBEAT_MAX_INTERVAL_S`, exista din alt motiv: fara el, o valoare uriasa
+inmultita cu 1000 s-ar rasturna, iar „pauza foarte lunga" ar deveni „bataie
+la fiecare trecere prin `loop()`".
+
+`heartbeatTimeoutSeconds` este **toleranta serverului**, si se foloseste in
+doua feluri. La pornire se verifica daca ritmul incape in ea si se striga
+daca nu: altfel hub-ul ar aparea offline *intre doua batai reusite* — o
+defectiune invizibila de pe hub, unde totul merge. In rulare, cand ultima
+bataie reusita este mai veche decat toleranta, se anunta o data caderea si
+o data revenirea, ca la senzorii care amutesc.
+
+`pendingCommandCount` se **raporteaza** pe Serial si in `status`, dar nu
+declanseaza nimic: pentru comenzi nu exista inca endpoint.
+
+## Actualizarea configului: `GET /api/device/config`
+
+Cand o bataie raspunde cu `configUpdateRequired: true`, hub-ul cere configul
+nou — fara corp, cu acelasi antet `X-Solvix-ApiKey` — il salveaza in NVS si
+**isi schimba ritmul pe loc**, fara repornire. Pe Serial apare o linie de
+forma:
+
+```
+[HB] Config nou aplicat: v2 -> v3. Ritm 60 -> 30 s, toleranta 180 -> 120 s.
+```
+
+Trei lucruri de stiut:
+
+- **Cel mult o cerere per trecere prin `loop()`.** Daca si bataia, si configul
+  sunt scadente, se face doar configul; bataia asteapta o trecere. Doua cereri
+  blocante la rand ar dubla fereastra in care hub-ul e surd. Din acelasi
+  motiv, preluarea nu porneste lipita de bataia care a anuntat-o, ci dupa
+  `HTTP_QUIET_AFTER_RX_MS` — cat sa incapa un senzor intre ele.
+- **Cel mult o preluare per `configVersion` anuntata.** Serverul stinge
+  `configUpdateRequired` la citire, deci in mod normal se cere o singura data.
+  Daca vreodata nu il stinge, sau daca uita sa incrementeze `configVersion`,
+  garda opreste ciclul si o spune o data pe Serial.
+- **Un config care nu s-a putut lua nu opreste nimic.** Hub-ul ramane pe cel
+  vechi — care e chiar cel dupa care merge — si reincearca cu backoff. O
+  bataie esuata si un config nepreluat sunt lucruri diferite, cu contoare
+  diferite: al doilea nu inseamna ca serverul nu ne vede.
+
+Raspunsul are 12 campuri, cu unul in plus fata de configul din provisioning:
+`maxOfflineMessages`. El sta **ultimul** in `HubConfig`, si acolo trebuie sa
+ramana — asa blobul vechi de 20 de octeti salvat de hub-urile deja
+provizionate se citeste corect peste structura de 22, campul nou ramane 0, si
+`IDENTITY_BLOB_VERSION` **nu** trebuie crescut. Un camp inserat la mijloc ar
+deplasa toate offset-urile de dupa el si ar forta o re-provizionare.
+
+Se folosesc tot doar cele doua valori de heartbeat. Celelalte zece **se
+salveaza, dar inca nu se folosesc**.
 
 ## Comenzi
 
-Se scriu ca text si se termina cu Enter (Serial Monitor la **115200**,
-terminator **Newline**).
+Trei, si atat. Se scriu ca text si se termina cu Enter (Serial Monitor la
+**115200**, terminator **Newline**; merge si pe „No line ending", comanda
+se preia dupa o scurta pauza).
 
 | Comanda | Ce face |
 |---------|---------|
 | `pair` | Deschide fereastra de inrolare. LED 2 clipeste cat timp e deschisa |
-| `sensors` | **Tabelul retelei:** toate locurile, cu ultima temperatura, vechimea ei, RSSI, pachete primite si pierdute |
-| `list` | Senzorii inrolati, din registrul salvat in NVS |
-| `provisioned` | Senzorii care **au voie** sa se inroleze (lista din `Config.h`) |
+| `status` | **Tot ce se poate vedea:** tabelul celor `HUB_MAX_SENSORS` locuri (temperatura, vechimea ei, RSSI, pachete primite si pierdute), cati senzori sunt inrolati, starea retelei, starea cloud-ului, **pulsul** (cand a fost ultimul heartbeat reusit) si identitatea hub-ului |
 | `remove <DevEUI>` | Il scoate din retea. Primeste `CMD_DOWN(RESET)` la **fiecare** pachet al lui, iar inregistrarea dispare abia dupa ce senzorul **tace** `REMOVE_CONFIRM_SILENCE_MS` (F-031). Refuzat daca senzorul nu a trimis niciodata nimic |
 | `remove #3` | Acelasi lucru, dupa **numarul** senzorului |
 | `remove <...> force` | Il sterge imediat din registru, fara sa il anunte. Recuperarea se face de la butonul 2 al senzorului |
-| `stats` | Contoarele legaturii radio, apoi tabelul `sensors` |
-| `net` | Transport, IP, reinnoiri DHCP, conexiuni TCP deschise/inchise. Reincearca DHCP daca legatura e jos |
-| `hub` | Identitatea hub-ului. `apiKey` **mascat**, `provisioningSecret` deloc |
-| `cloud` | Starea bootstrap-ului: ultimul status HTTP, ultima sanatate, esecuri, urmatoarea reincercare |
-| `health` | Verifica acum serverul si baza de date |
-| `provision` | Cere acum provisioning-ul. **Refuza daca e deja provizionat** |
-| `forget yes` | Sterge identitatea din flash. `forget` gol doar avertizeaza. Senzorii **nu** sunt afectati |
-| `mem` | Heap liber si minimul atins de la pornire |
-| `reboot` | Salveaza registrul si reporneste |
 | `help` | Lista aceasta |
 
 `DevEUI` se scrie ca 16 cifre hexazecimale, de exemplu
@@ -89,6 +158,16 @@ Numarul senzorului se scrie ca `#3` sau ca `3`.
 
 **Butonul 1 (GPIO34)** deschide si el fereastra de pairing, ca sa nu fie
 nevoie de un calculator langa hub.
+
+### Ce arata `status`, si de ce codul de revendicare este acolo
+
+Pe langa senzori, `status` afiseaza `hubGuid`, `lifecycleStatus` si
+**`pairingCode` intreg**. Codul acela exista ca sa fie citit de un om de pe
+ecran si tastat in aplicatie ca sa revendice hub-ul, iar `status` este
+singurul loc din care se poate afla.
+
+**`apiKey` nu se afiseaza nicaieri**, nici macar mascat, iar
+`provisioningSecret` cu atat mai putin: el este compilat in firmware.
 
 ## Regula care guverneaza tot ce se adauga in `loop()`
 

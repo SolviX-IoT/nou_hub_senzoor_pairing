@@ -63,7 +63,31 @@
     Http.*              - cereri HTTP peste un Client oarecare
     HubIdentity.*       - identitatea primita de la cloud, in NVS
     HubCloud.*          - bootstrap: /api/health si /api/device/provision
-    SerialConsole.*     - comenzile de pe Serial
+    HubHeartbeat.*      - semnul de viata periodic: /api/device/heartbeat
+    SerialConsole.*     - comenzile de pe Serial: pair, status, remove
+
+  CE FACE, PE SCURT
+  ---------------------------------------------------------------------
+  Doua lucruri, si atat:
+
+    1. INREGISTRAREA IN RETEA, SI APOI SEMNUL DE VIATA. Ia o adresa prin
+       DHCP, verifica serverul (GET /api/health, si conteaza campul
+       "database", nu "status") si, daca identitatea din flash este goala,
+       o cere cu POST /api/device/provision. Rezultatul se salveaza in
+       NVS, deci a doua pornire nu mai cere nimic.
+
+       De acolo incolo bate: POST /api/device/heartbeat la fiecare
+       heartbeatIntervalSeconds, cat timp hub-ul este alimentat. Ritmul
+       nu este ales aici, vine din configul de provisioning - dar trece
+       printr-o podea locala, fiindca o cerere tine hub-ul surd si un
+       parametru venit prin retea nu are voie sa opreasca receptia.
+
+    2. COMUNICAREA CU SENZORII. Inroleaza pana la HUB_MAX_SENSORS placi,
+       primeste temperaturile lor, le confirma cu ACK si le poate scoate
+       din retea cu o dezinrolare confirmata prin tacere.
+
+  Consola are trei comenzi: `pair`, `status`, `remove`. Tot ce se poate
+  vedea se vede din `status`.
 */
 
 #include "Config.h"
@@ -75,6 +99,7 @@
 #include "NetLink.h"
 #include "HubIdentity.h"
 #include "HubCloud.h"
+#include "HubHeartbeat.h"
 #include "SerialConsole.h"
 
 // Butonul 1 ca declansator de pairing: se retine starea precedenta ca sa
@@ -166,6 +191,11 @@ void setup() {
   // departe de ferestrele de downlink ale senzorilor.
   HubCloud::begin();
 
+  // Semnul de viata periodic. Nu bate pana cand HubCloud nu ajunge in
+  // Ready: pana atunci nu exista nici identitate, nici ritm - amandoua vin
+  // din configul primit la provisioning.
+  HubHeartbeat::begin();
+
   SerialConsole::begin();
 }
 
@@ -187,4 +217,9 @@ void loop() {
   // Bootstrap-ul in cloud: sanatatea serverului, apoi provisioning-ul.
   // Costa 0 ms cat timp nu are nimic de facut.
   HubCloud::tick();
+
+  // Semnul de viata, la ritmul cerut de server. Incepe unde se termina
+  // bootstrap-ul, trece prin aceleasi doua porti ca HubCloud si costa o
+  // comparatie intre batai.
+  HubHeartbeat::tick();
 }

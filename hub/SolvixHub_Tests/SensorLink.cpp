@@ -22,17 +22,10 @@ namespace SensorLink {
 
   // Contoare, toate afisate de `stats`.
   static unsigned long s_joinsAccepted = 0;
-  static unsigned long s_joinsRejected = 0;
   static unsigned long s_dataValid = 0;
-  static unsigned long s_dataReplay = 0;
-  static unsigned long s_dataBadMic = 0;
-  static unsigned long s_dataUnknown = 0;
-  static unsigned long s_foreign = 0;
-  static unsigned long s_removalsConfirmed = 0;
 
   // Cate pachete au lipsit cu totul, insumat pe toti senzorii. Se deduc
   // din golurile de frame counter; per senzor, cifra sta in registru.
-  static unsigned long s_lostTotal = 0;
 
   // Cate pachete de la adrese neinrolate au trecut de la ultimul sfat de
   // recuperare afisat.
@@ -46,10 +39,7 @@ namespace SensorLink {
   // in SensorLink.h.
   static unsigned long s_lastRxMs = 0;
 
-  // Carligul pentru telemetrie, neinregistrat deocamdata.
-  static ReadingHandler s_readingHandler = NULL;
 
-  bool isRunning()     { return s_ready; }
   bool isPairingMode() { return s_pairingMode; }
 
   // -------------------------------------------------------------------
@@ -218,7 +208,6 @@ namespace SensorLink {
 
       DeviceRegistry::removeByEui(eui);
       s_sinceSave = 0;
-      s_removalsConfirmed++;
 
       Serial.println();
       Serial.print(F(">> DEZINROLARE CONFIRMATA: Senzor #"));
@@ -284,7 +273,6 @@ namespace SensorLink {
                                 int rssi, float snr) {
     JoinRequest request;
     if (!SensorPacketCodec::parseJoinRequest(buffer, length, request)) {
-      s_joinsRejected++;
       return;
     }
 
@@ -297,7 +285,6 @@ namespace SensorLink {
     Serial.println(F(" dB"));
 
     if (!s_pairingMode) {
-      s_joinsRejected++;
       Serial.println(F("      REFUZAT: hub-ul nu este in mod pairing (comanda 'pair')."));
       return;
     }
@@ -307,7 +294,6 @@ namespace SensorLink {
     //    provisioning nu mai este DOVEDITA, ci doar declarata. Oricine
     //    poate emite un JOIN_REQ cu un DevEUI din lista.
     if (!DeviceRegistry::isProvisioned(request.devEui)) {
-      s_joinsRejected++;
       Serial.println(F("      REFUZAT: DevEUI-ul nu este in lista de provisioning din Config.h."));
       return;
     }
@@ -322,7 +308,6 @@ namespace SensorLink {
     //    poate fi deci scris pe cutie.
     uint8_t devAddr = DeviceRegistry::addressForEui(request.devEui);
     if (devAddr == 0) {
-      s_joinsRejected++;
       Serial.println(F("      REFUZAT: DevEUI-ul este in lista de provisioning, dar pe o pozitie"));
       Serial.println(F("      peste HUB_MAX_SENSORS. Creste HUB_MAX_SENSORS in Config.h sau muta"));
       Serial.println(F("      randul mai sus in PROVISIONED_DEVICES_INIT."));
@@ -336,7 +321,6 @@ namespace SensorLink {
     // cheia altui senzor.
     DeviceRecord* squatter = DeviceRegistry::findByAddr(devAddr);
     if (squatter != nullptr && squatter != existing) {
-      s_joinsRejected++;
       Serial.print(F("      REFUZAT: numarul #"));
       Serial.print(devAddr);
       Serial.println(F(" este ocupat in registru de alt DevEUI (inregistrare veche)."));
@@ -346,7 +330,6 @@ namespace SensorLink {
 
     DeviceRecord* record = DeviceRegistry::add(request.devEui, devAddr);
     if (record == nullptr) {
-      s_joinsRejected++;
       Serial.println(F("      REFUZAT: registrul este plin."));
       return;
     }
@@ -379,7 +362,6 @@ namespace SensorLink {
                                   int rssi, float snr) {
     SensorData data;
     if (!SensorPacketCodec::parseData(buffer, length, data)) {
-      s_dataUnknown++;
       return;
     }
 
@@ -390,7 +372,6 @@ namespace SensorLink {
     // amandoua pe radio, deci nu exista "date amestecate".
     DeviceRecord* device = DeviceRegistry::findByAddr(data.devAddr);
     if (device == nullptr) {
-      s_dataUnknown++;
       Serial.print(F("[DATA] IGNORAT: DevAddr 0x"));
       if (data.devAddr < 0x10) Serial.print('0');
       Serial.print(data.devAddr, HEX);
@@ -412,7 +393,6 @@ namespace SensorLink {
     // Anti-replay INAINTE de orice operatie criptografica: un pachet
     // rejucat nu merita nici macar o cifrare.
     if (device->hasUplink && data.frameCounter <= device->lastFrameCounterUp) {
-      s_dataReplay++;
       Serial.print(F("[DATA] REPLAY de la "));
       printSensorTag(data.devAddr);
       Serial.print(F(": counter "));
@@ -455,7 +435,6 @@ namespace SensorLink {
       // "cheie gresita": inseamna ori un emitator strain care nimereste
       // aceiasi parametri radio si aceeasi adresa, ori un capat ramas pe
       // firmware vechi.
-      s_dataBadMic++;
       Serial.print(F("[DATA] "));
       printSensorTag(data.devAddr);
       Serial.println(F(": payload-ul nu trece de checksum. Emitator strain sau"));
@@ -495,7 +474,6 @@ namespace SensorLink {
       }
       else if (gap > 0) {
         device->lostPackets += gap;
-        s_lostTotal += gap;
       }
     }
 
@@ -520,8 +498,7 @@ namespace SensorLink {
      * = 600 ms de la sfarsitul propriei transmisii, iar hub-ul raspundea
      * in ~55 ms - marja este confortabila, dar linia de jurnal de mai jos
      * are vreo 110 caractere, adica ~9,5 ms la 115200 baud, cheltuiti
-     * degeaba din interiorul ferestrei. Ordinea de aici costa zero si
-     * face loc si carligului de telemetrie de mai jos, care va creste.
+     * degeaba din interiorul ferestrei. Ordinea de aici costa zero.
      *
      * Dezinrolarea a fost tratata mai sus, inainte de decodare: aici
      * ajung doar pachetele unui device sanatos.
@@ -530,13 +507,6 @@ namespace SensorLink {
     device->downCounter++;
     sendCommand(*device, CMD_TYPE_ACK);
 #endif
-
-    // Carligul pentru telemetrie. Astazi nu este inregistrat nimeni;
-    // cand va fi, are voie DOAR sa puna intr-o coada (vezi SensorLink.h).
-    if (s_readingHandler != NULL) {
-      s_readingHandler(data.devAddr, packet.tempX100, data.frameCounter,
-                       (int16_t)rssi, packet.reason);
-    }
 
     Serial.print(F("[#"));
     Serial.print(s_dataValid);
@@ -630,13 +600,11 @@ namespace SensorLink {
         case SENSOR_MSG_TEMPERATURE:
           // Un senzor neinrolat, care emite pachetul fara adresa: nu
           // este o eroare, dar nu poate fi atribuit nimanui.
-          s_foreign++;
           Serial.println(F("[PLAIN] Pachet de temperatura fara adresa - senzorul nu este inrolat."));
           Serial.println(F("        Inroleaza-l cu 'pair' plus butonul 2 tinut 3 s pe placa."));
           break;
 
         default:
-          s_foreign++;
           SensorPacketCodec::printRaw(buffer, length);
           Serial.println();
           break;
@@ -658,22 +626,7 @@ namespace SensorLink {
     delay(5);
   }
 
-  void stop() {
-    exitPairingMode();
-
-    // Ce s-a acumulat in RAM de la ultima salvare merge acum pe disc.
-    DeviceRegistry::save();
-
-    LoRaRadio::sleep();
-    Leds::allOff();
-    s_ready = false;
-
-    printStats();
-  }
-
   unsigned long lastRxMs() { return s_lastRxMs; }
-
-  void onReading(ReadingHandler handler) { s_readingHandler = handler; }
 
   /*
    * Exista vreo dezinrolare in curs?
@@ -690,26 +643,5 @@ namespace SensorLink {
       if (device != NULL && device->pendingReset) return true;
     }
     return false;
-  }
-
-  void printStats() {
-    printSeparator();
-    Serial.println(F("Contoare pairing:"));
-    Serial.print(F("  inrolari acceptate : ")); Serial.println(s_joinsAccepted);
-    Serial.print(F("  inrolari refuzate  : ")); Serial.println(s_joinsRejected);
-    Serial.print(F("  pachete de date OK : ")); Serial.println(s_dataValid);
-    Serial.print(F("  replay respinse    : ")); Serial.println(s_dataReplay);
-    Serial.print(F("  payload invalid    : ")); Serial.println(s_dataBadMic);
-    Serial.print(F("  adresa necunoscuta : ")); Serial.println(s_dataUnknown);
-    Serial.print(F("  pachete straine    : ")); Serial.println(s_foreign);
-    Serial.print(F("  pachete pierdute   : ")); Serial.print(s_lostTotal);
-    Serial.println(F("   (goluri in frame counter, pe toti senzorii)"));
-    Serial.print(F("  dezinrolari confirmate: ")); Serial.println(s_removalsConfirmed);
-    Serial.print(F("  senzori inrolati   : "));
-    Serial.print(DeviceRegistry::count());
-    Serial.print('/');
-    Serial.println(HUB_MAX_SENSORS);
-    Serial.print(F("  mod pairing        : "));
-    Serial.println(s_pairingMode ? F("ACTIV") : F("inchis"));
   }
 }

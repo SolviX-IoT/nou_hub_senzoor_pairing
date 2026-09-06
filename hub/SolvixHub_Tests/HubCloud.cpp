@@ -1,5 +1,4 @@
 #include "HubCloud.h"
-#include "Console.h"
 #include "NetLink.h"
 #include "Http.h"
 #include "HubIdentity.h"
@@ -53,8 +52,6 @@ namespace HubCloud {
   // Ce s-a intamplat ultima data, pentru comanda `cloud`.
   static int           s_lastStatus = 0;
   static uint32_t      s_lastRetryAfterS = 0;
-  static unsigned long s_lastOkMs = 0;
-  static bool          s_everHealthy = false;
   static char          s_lastError[48] = "";
 
   State state() { return s_state; }
@@ -243,8 +240,6 @@ namespace HubCloud {
       return false;
     }
 
-    s_everHealthy = true;
-    s_lastOkMs = millis();
     setError("");
     return true;
   }
@@ -396,7 +391,18 @@ namespace HubCloud {
     Serial.println();
     Serial.println(F("[CLOUD] PROVISIONING REUSIT. Identitatea este salvata in flash;"));
     Serial.println(F("        la urmatoarea pornire hub-ul NU o va mai cere."));
-    HubIdentity::print();
+
+    // Doar ce foloseste un om: identificatorul hub-ului si codul cu care
+    // se revendica din aplicatie. apiKey nu se afiseaza niciodata, iar
+    // restul se vede oricand cu `status`.
+    Serial.print(F("        hub  "));
+    Serial.print(identity.hubGuid);
+    Serial.print(F("  ("));
+    Serial.print(identity.lifecycleStatus);
+    Serial.println(')');
+    Serial.print(F("        cod de revendicare: "));
+    Serial.println(identity.pairingCode);
+    Serial.println();
     return true;
   }
 
@@ -420,7 +426,21 @@ namespace HubCloud {
   }
 
   void tick() {
-    if (s_state == State::Ready || s_state == State::Blocked) {
+    if (s_state == State::Ready) return;
+
+    /*
+     * Blocked se trateaza aici, inaintea portilor: este doar o asteptare
+     * lunga si nu costa decat o comparatie. Cand se scurge, se reintra in
+     * Health cu contoarele pe zero - hub-ul isi revine singur, fara nicio
+     * comanda, fiindca nu mai exista niciuna care sa il scoata de acolo.
+     */
+    if (s_state == State::Blocked) {
+      if ((long)(millis() - s_nextAttempt) < 0) return;
+
+      Serial.println(F("[CLOUD] A trecut pauza lunga. Incerc din nou."));
+      s_healthFailures = 0;
+      s_provisionFailures = 0;
+      s_state = State::Health;
       return;
     }
 
@@ -531,17 +551,20 @@ namespace HubCloud {
          */
         if (s_provisionFailures >= CLOUD_PROVISION_MAX_ATTEMPTS) {
           s_state = State::Blocked;
+          s_nextAttempt = millis() + CLOUD_BLOCKED_RETRY_MS;
+
           Serial.println();
-          Serial.print(F("[CLOUD] OPRIT dupa "));
+          Serial.print(F("[CLOUD] Ma opresc dupa "));
           Serial.print(s_provisionFailures);
           Serial.println(F(" incercari de provisioning esuate la rand."));
-          Serial.println(F("        Nu mai incerc singur: fiecare incercare in plus aduna un esec"));
-          Serial.println(F("        in contul device-ului, fara sa apropie de nimic."));
-          Serial.println(F("        Verifica, in ordine:"));
+          Serial.println(F("        Fiecare incercare in plus aduna un esec in contul device-ului,"));
+          Serial.println(F("        fara sa apropie de nimic. Verifica, in ordine:"));
           Serial.println(F("          1. este deviceUid-ul deja provizionat pe server?"));
           Serial.println(F("          2. mai este valid provisioningSecret, sau a fost consumat?"));
           Serial.println(F("          3. s-a stins fereastra de rate limiting?"));
-          Serial.println(F("        Cand stii raspunsul: comanda 'provision' reia de la capat."));
+          Serial.print(F("        Reincerc singur peste "));
+          Serial.print(CLOUD_BLOCKED_RETRY_MS / 60000UL);
+          Serial.println(F(" minute."));
           Serial.println(F("        Senzorii merg mai departe normal - se pierde doar cloud-ul."));
           Serial.println();
           return;
@@ -560,113 +583,8 @@ namespace HubCloud {
   }
 
   // -------------------------------------------------------------------
-  // Comenzi
+  // Pentru comanda `status`
   // -------------------------------------------------------------------
 
-  void forceHealth() {
-    if (!NetLink::isUp()) {
-      Serial.println(F("Nu exista legatura la retea. Incearca intai 'net'."));
-      return;
-    }
-
-    if (millis() - SensorLink::lastRxMs() < HTTP_QUIET_AFTER_RX_MS) {
-      Serial.println(F("Un senzor tocmai a emis si isi tine fereastra de downlink deschisa."));
-      Serial.println(F("Astept sa se inchida si pornesc cererea imediat dupa."));
-    }
-
-    // Cererea propriu-zisa ramane in tick(), unde trec portile.
-    s_healthFailures = 0;
-    s_nextAttempt = millis();
-    if (s_state != State::Provision) s_state = State::Health;
-  }
-
-  void forceProvision() {
-    if (HubIdentity::isProvisioned()) {
-      Serial.println(F("Hub-ul este DEJA provizionat. Nu se cere din nou."));
-      Serial.println(F("Un al doilea provisioning pentru acelasi deviceUid poate crea un hub nou"));
-      Serial.println(F("pe server si poate lasa istoricul vechi orfan - depinde daca endpoint-ul"));
-      Serial.println(F("este idempotent, ceea ce nu este confirmat."));
-      Serial.println(F("Daca chiar vrei asta: 'forget yes', apoi 'provision'."));
-      return;
-    }
-
-    if (!NetLink::isUp()) {
-      Serial.println(F("Nu exista legatura la retea. Incearca intai 'net'."));
-      return;
-    }
-
-    // Comanda data de om sterge si oprirea din Blocked: el a vazut
-    // motivul si a decis sa mai incerce o data.
-    s_healthFailures = 0;
-    s_provisionFailures = 0;
-    s_nextAttempt = millis();
-    s_retryInto = State::Health;
-    s_state = State::Health;      // sanatatea intai, provisioning-ul dupa
-    Serial.println(F("Pornesc secventa: sanatate -> provisioning."));
-  }
-
-  void printStatus() {
-    Serial.println();
-    printSeparator();
-    Serial.println(F("  CLOUD"));
-    printSeparator();
-
-    Serial.print(F("Server      : "));
-    Serial.print(CLOUD_IP);
-    Serial.print(':');
-    Serial.println(CLOUD_PORT);
-
-    Serial.print(F("Stare       : "));
-    Serial.println(stateName());
-
-    Serial.print(F("Provizionat : "));
-    Serial.println(HubIdentity::isProvisioned() ? F("da") : F("NU"));
-
-    Serial.print(F("Ultimul HTTP: "));
-    if (s_lastStatus == 0) {
-      Serial.println(F("nicio cerere inca"));
-    } else {
-      Serial.print(s_lastStatus);
-      Serial.print(F(" ("));
-      Serial.print(Http::resultText(s_lastStatus));
-      Serial.println(')');
-    }
-
-    Serial.print(F("Sanatate OK : "));
-    if (!s_everHealthy) {
-      Serial.println(F("niciodata in sesiunea asta"));
-    } else {
-      Serial.print(F("acum "));
-      Serial.print((millis() - s_lastOkMs) / 1000UL);
-      Serial.println(F(" s"));
-    }
-
-    Serial.print(F("Esecuri     : "));
-    Serial.print(s_healthFailures);
-    Serial.print(F(" la sanatate, "));
-    Serial.print(s_provisionFailures);
-    Serial.print(F(" la provisioning (din "));
-    Serial.print(CLOUD_PROVISION_MAX_ATTEMPTS);
-    Serial.println(F(" permise)"));
-
-    if (s_lastRetryAfterS != 0) {
-      Serial.print(F("Retry-After : "));
-      Serial.print(s_lastRetryAfterS);
-      Serial.println(F(" s (cerut de server)"));
-    }
-
-    if (s_lastError[0] != '\0') {
-      Serial.print(F("Ultima eroare: "));
-      Serial.println(s_lastError);
-    }
-
-    if (s_state == State::HealthBackoff) {
-      long remaining = (long)(s_nextAttempt - millis());
-      Serial.print(F("Reincercare : peste "));
-      Serial.print(remaining > 0 ? (remaining / 1000L) : 0L);
-      Serial.println(F(" s"));
-    }
-
-    Serial.println();
-  }
+  const char* lastError() { return s_lastError; }
 }

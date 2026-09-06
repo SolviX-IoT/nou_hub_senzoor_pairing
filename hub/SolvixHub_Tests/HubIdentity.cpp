@@ -1,5 +1,4 @@
 #include "HubIdentity.h"
-#include "Console.h"
 #include <Preferences.h>
 
 namespace HubIdentity {
@@ -29,39 +28,6 @@ namespace HubIdentity {
 
   bool isProvisioned() {
     return s_data.hubGuid[0] != '\0' && s_data.apiKey[0] != '\0';
-  }
-
-  // -------------------------------------------------------------------
-  // Mascarea secretelor
-  // -------------------------------------------------------------------
-
-  /*
-   * Un secret se arata ca "bli0...aWr (43 caractere)": destul ca sa
-   * distingi doua hub-uri intr-un jurnal, inutil pentru cineva care vrea
-   * sa il foloseasca. Sub 12 caractere nu se arata nimic din el - la
-   * lungimi mici, prefixul plus sufixul ar fi aproape tot secretul.
-   */
-  static void printMasked(const char* secret) {
-    size_t len = strlen(secret);
-
-    if (len == 0) {
-      Serial.println(F("(gol)"));
-      return;
-    }
-
-    if (len < 12) {
-      Serial.print(F("(ascuns, "));
-      Serial.print(len);
-      Serial.println(F(" caractere)"));
-      return;
-    }
-
-    for (uint8_t i = 0; i < 4; i++) Serial.print(secret[i]);
-    Serial.print(F("..."));
-    for (size_t i = len - 3; i < len; i++) Serial.print(secret[i]);
-    Serial.print(F(" ("));
-    Serial.print(len);
-    Serial.println(F(" caractere)"));
   }
 
   // -------------------------------------------------------------------
@@ -163,88 +129,26 @@ namespace HubIdentity {
     return true;
   }
 
-  void clear() {
-    if (!s_open) return;
-
-    // Versiunea PRIMA, din acelasi motiv pentru care se scrie ultima.
-    s_prefs.remove(KEY_VERSION);
-    s_prefs.remove(KEY_GUID);
-    s_prefs.remove(KEY_SERIAL);
-    s_prefs.remove(KEY_APIKEY);
-    s_prefs.remove(KEY_PAIRCODE);
-    s_prefs.remove(KEY_LIFECYCLE);
-    s_prefs.remove(KEY_PROVAT);
-    s_prefs.remove(KEY_MAXSENS);
-    s_prefs.remove(KEY_CONFIG);
-
-    memset(&s_data, 0, sizeof(s_data));
-  }
-
-  // -------------------------------------------------------------------
-  // Afisare
-  // -------------------------------------------------------------------
-
-  void print() {
-    Serial.println();
-    printSeparator();
-    Serial.println(F("  IDENTITATEA HUB-ULUI"));
-    printSeparator();
-
-    Serial.println(F("Din firmware (Config.h):"));
-    Serial.print(F("  id                 : ")); Serial.println(HUB_ID);
-    Serial.print(F("  deviceUid          : ")); Serial.println(F(HUB_DEVICE_UID));
-    Serial.print(F("  serialNumber       : ")); Serial.println(F(HUB_SERIAL_NUMBER));
-    Serial.print(F("  firmwareVersion    : ")); Serial.println(F(HUB_FIRMWARE_VERSION));
-    // provisioningSecret NU se afiseaza, nici macar lungimea: si lungimea
-    // este un indiciu, iar secretul este oricum compilat si neschimbabil.
-    Serial.println(F("  provisioningSecret : (compilat in firmware, nu se afiseaza)"));
-
-    Serial.println();
-
-    if (!isProvisioned()) {
-      Serial.println(F("De la server: NIMIC - hub-ul nu este provizionat."));
-      Serial.println(F("Se cere singur cand reteaua si serverul sunt disponibile."));
-      Serial.println(F("Comanda 'cloud' arata la ce pas este."));
-      Serial.println();
-      return;
-    }
-
-    Serial.println(F("De la server (NVS):"));
-    Serial.print(F("  hubGuid            : ")); Serial.println(s_data.hubGuid);
-    Serial.print(F("  serialNumber       : ")); Serial.println(s_data.serialNumber);
-    Serial.print(F("  apiKey             : ")); printMasked(s_data.apiKey);
+  bool storeConfig(const HubConfig& config) {
+    if (!s_open) return false;
 
     /*
-     * pairingCode se afiseaza INTREG, spre deosebire de apiKey.
-     *
-     * Rostul lui este sa fie citit de un om de pe ecran si tastat in
-     * aplicatie ca sa revendice hub-ul - de aceea are noua caractere si
-     * o cratima la mijloc, nu patruzeci si trei. Mascat, nu si-ar mai
-     * putea face treaba, si prima consecinta ar fi ca cineva l-ar citi
-     * oricum, direct din NVS. apiKey este altceva: acela nu trebuie citit
-     * de nimeni, niciodata.
+     * O identitate care nu exista nu are ce config sa primeasca. Fara
+     * verificarea asta, un raspuns venit intr-un moment nefericit ar
+     * scrie un bloc de configurare langa un KEY_VERSION inexistent, iar
+     * la urmatoarea pornire ar fi oricum ignorat - dar in NVS ar ramane
+     * un blob orfan care nu spune nimanui nimic.
      */
-    Serial.print(F("  pairingCode        : ")); Serial.println(s_data.pairingCode);
-    Serial.print(F("  lifecycleStatus    : ")); Serial.println(s_data.lifecycleStatus);
-    Serial.print(F("  provisionedAt      : ")); Serial.println(s_data.provisionedAt);
-    Serial.print(F("  maxSensors         : ")); Serial.print(s_data.maxSensors);
-    Serial.print(F("   (local: "));
-    Serial.print(HUB_MAX_SENSORS);
-    Serial.println(F(")"));
+    if (!isProvisioned()) return false;
 
-    Serial.println();
-    Serial.println(F("Config primit (salvat, dar inca nefolosit - etapa urmatoare):"));
-    Serial.print(F("  heartbeatInterval  : ")); Serial.print(s_data.config.heartbeatIntervalSeconds); Serial.println(F(" s"));
-    Serial.print(F("  heartbeatTimeout   : ")); Serial.print(s_data.config.heartbeatTimeoutSeconds);  Serial.println(F(" s"));
-    Serial.print(F("  cloudSyncInterval  : ")); Serial.print(s_data.config.cloudSyncIntervalSeconds); Serial.println(F(" s"));
-    Serial.print(F("  maxBatchSize       : ")); Serial.println(s_data.config.maxBatchSize);
-    Serial.print(F("  offlineStorage     : ")); Serial.println(s_data.config.offlineStorageEnabled ? F("da") : F("nu"));
-    Serial.print(F("  offlineCleanupDays : ")); Serial.println(s_data.config.offlineCleanupDays);
-    Serial.print(F("  retryInterval      : ")); Serial.print(s_data.config.retryIntervalSeconds);     Serial.println(F(" s"));
-    Serial.print(F("  maxRetryAttempts   : ")); Serial.println(s_data.config.maxRetryAttempts);
-    Serial.print(F("  discoveryDuration  : ")); Serial.print(s_data.config.discoveryDurationSeconds); Serial.println(F(" s"));
-    Serial.print(F("  configVersion      : ")); Serial.println(s_data.config.configVersion);
-    Serial.print(F("  autoFirmwareUpdate : ")); Serial.println(s_data.config.autoFirmwareUpdate ? F("da") : F("nu"));
-    Serial.println();
+    size_t written = s_prefs.putBytes(KEY_CONFIG, &config, sizeof(config));
+
+    if (written != sizeof(config)) {
+      Serial.println(F("[HUB] EROARE: configul nou nu s-a putut scrie in NVS."));
+      return false;
+    }
+
+    s_data.config = config;
+    return true;
   }
 }

@@ -35,18 +35,14 @@ namespace LoRaRadio {
 
   bool isReady();
 
-  // Trimite un text. Intoarce true daca pachetul a fost predat radioului.
-  bool sendText(const String& text);
-
-  // Varianta binara a lui sendText(). Obligatorie pentru pachetele de
-  // pairing: JOIN_ACCEPT si CMD_DOWN pot contine octeti 0x00 (adresa,
-  // contoare), iar String i-ar trata drept terminator de sir - exact
-  // problema care a dus la receiveRaw() (F-019), acum si pe emisie.
+  // Trimite un pachet, ca octeti bruti. Nu exista varianta cu String, si
+  // nici nu trebuie sa existe: JOIN_ACCEPT si CMD_DOWN pot contine octeti
+  // 0x00 (adresa, contoare), iar String i-ar trata drept terminator de
+  // sir - exact problema care a dus la receiveRaw() (F-019).
   bool sendRaw(const uint8_t* data, uint8_t length);
 
   // Verifica daca a sosit un pachet. Daca da, il pune in out si
   // completeaza rssi/snr. Nu blocheaza.
-  bool receive(String& out, int& rssi, float& snr);
 
   // Varianta binara a lui receive(). Obligatorie pentru pachetele
   // nodului senzor: acolo un octet poate fi 0x00, iar String l-ar trata

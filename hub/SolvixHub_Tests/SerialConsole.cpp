@@ -6,6 +6,7 @@
 #include "NetLink.h"
 #include "HubIdentity.h"
 #include "HubCloud.h"
+#include "HubHeartbeat.h"
 
 namespace SerialConsole {
 
@@ -120,7 +121,101 @@ namespace SerialConsole {
   }
 
   // -------------------------------------------------------------------
-  // Comenzile
+  // status
+  // -------------------------------------------------------------------
+
+  /*
+   * Tot ce trebuie vazut, intr-un singur loc: senzorii, reteaua, cloud-ul
+   * si identitatea hub-ului.
+   *
+   * A luat locul comenzilor `sensors`, `list`, `provisioned`, `stats`,
+   * `net`, `hub` si `cloud`. Fiecare dintre ele raspundea la o bucata din
+   * "merge sau nu merge?", si trebuia sa le stii pe toate ca sa afli.
+   */
+  static void commandStatus() {
+    Serial.println();
+    printSeparator();
+    Serial.println(F("  STARE"));
+    printSeparator();
+
+    // --- Senzorii ----------------------------------------------------
+    DeviceRegistry::printSensorTable();
+
+    Serial.print(F("Inrolati: "));
+    Serial.print(DeviceRegistry::count());
+    Serial.print(F(" din "));
+    Serial.print(HUB_MAX_SENSORS);
+    Serial.println(SensorLink::isPairingMode()
+                   ? F("   (fereastra de inrolare este DESCHISA)")
+                   : F(""));
+
+    // --- Reteaua -----------------------------------------------------
+    Serial.print(F("Retea   : "));
+    Serial.print(NetLink::transportName());
+    if (NetLink::isUp()) {
+      Serial.print(F(", IP "));
+      Serial.println(NetLink::localIP());
+    } else {
+      Serial.println(F(", FARA ADRESA (senzorii merg oricum)"));
+    }
+
+    // --- Cloud -------------------------------------------------------
+    Serial.print(F("Cloud   : "));
+    Serial.print(HubCloud::stateName());
+    if (!HubIdentity::isProvisioned()) Serial.print(F(", NEPROVIZIONAT"));
+
+    const char* error = HubCloud::lastError();
+    if (error[0] != '\0') {
+      Serial.print(F("  ["));
+      Serial.print(error);
+      Serial.print(']');
+    }
+    Serial.println();
+
+    /*
+     * --- Pulsul ------------------------------------------------------
+     *
+     * Linia de cloud de mai sus spune daca bootstrap-ul s-a incheiat -
+     * o intrebare la care se raspunde o singura data, la pornire. Asta
+     * spune daca serverul ne mai VEDE acum, care este intrebarea de zi
+     * cu zi si singura defectiune din tot lantul invizibila altfel:
+     * senzorii se aud, LED-urile clipesc, consola raspunde, si totusi in
+     * aplicatie hub-ul apare mort.
+     */
+    HubHeartbeat::printStatus();
+
+    // --- Identitatea -------------------------------------------------
+    if (HubIdentity::isProvisioned()) {
+      const HubIdentityData& id = HubIdentity::get();
+
+      Serial.print(F("Hub     : "));
+      Serial.print(id.hubGuid);
+      Serial.print(F("  ("));
+      Serial.print(id.lifecycleStatus);
+      Serial.println(')');
+
+      /*
+       * pairingCode se afiseaza INTREG, si de asta a intrat aici.
+       *
+       * Rostul lui este sa fie citit de un om de pe ecran si tastat in
+       * aplicatie ca sa revendice hub-ul. De cand comanda `hub` nu mai
+       * exista, `status` este singurul loc din care se poate afla - iar
+       * un cod de revendicare pe care nu il poate citi nimeni nu isi mai
+       * face treaba.
+       *
+       * apiKey NU se afiseaza deloc, nici macar mascat: pe el nu are de
+       * ce sa il citeasca nimeni. provisioningSecret cu atat mai putin -
+       * el este compilat in firmware si nu apare nicaieri.
+       */
+      Serial.print(F("Cod     : "));
+      Serial.println(id.pairingCode);
+    }
+
+    Serial.println();
+  }
+
+  // -------------------------------------------------------------------
+  // remove
   // -------------------------------------------------------------------
 
   static void commandRemove(const String& argument) {
@@ -146,14 +241,14 @@ namespace SerialConsole {
       if (byNumber == nullptr) {
         Serial.print(F("Senzorul #"));
         Serial.print(number);
-        Serial.println(F(" nu este inrolat. Vezi 'sensors' pentru locurile ocupate."));
+        Serial.println(F(" nu este inrolat. Vezi 'status'."));
         return;
       }
       memcpy(eui, byNumber->devEui, DEV_EUI_LEN);
     }
     else if (!parseEui(euiText, eui)) {
-      Serial.println(F("Argument invalid. Se asteapta fie 16 cifre hexazecimale (DevEUI),"));
-      Serial.print(F("fie numarul senzorului, 1.."));
+      Serial.println(F("Se asteapta 16 cifre hexazecimale (DevEUI) sau numarul"));
+      Serial.print(F("senzorului, 1.."));
       Serial.print(HUB_MAX_SENSORS);
       Serial.println(F(", scris ca '#3' sau '3'."));
       return;
@@ -161,7 +256,7 @@ namespace SerialConsole {
 
     DeviceRecord* device = DeviceRegistry::findByEui(eui);
     if (device == nullptr) {
-      Serial.print(F("Nu exista niciun device inrolat cu DevEUI "));
+      Serial.print(F("Niciun device inrolat cu DevEUI "));
       SensorPacketCodec::printEui(eui);
       Serial.println();
       return;
@@ -171,37 +266,26 @@ namespace SerialConsole {
       uint8_t removedNumber = device->devAddr;
       DeviceRegistry::removeByEui(eui);
       Serial.print(F("Sters imediat din registru: Senzor #"));
-      Serial.print(removedNumber);
-      Serial.print(F(", DevEUI "));
-      SensorPacketCodec::printEui(eui);
-      Serial.println();
-      Serial.println(F("ATENTIE: senzorul NU a fost anuntat, deci se crede in continuare inrolat"));
-      Serial.println(F("si va emite mai departe. Hub-ul ii va vedea pachetele ca DATA_UP de la o"));
-      Serial.println(F("adresa necunoscuta. Oprirea si repornirea alimentarii nu ajuta - starea"));
-      Serial.println(F("sta in HEF. Curatarea corecta: tine butonul 2 apasat trei secunde pe"));
-      Serial.println(F("senzor (revine in repaus), sau, data viitoare, 'remove <DevEUI>' fara"));
-      Serial.println(F("'force' cat timp senzorul inca emite."));
+      Serial.println(removedNumber);
+      Serial.println(F("ATENTIE: senzorul NU a fost anuntat. Se crede in continuare inrolat si"));
+      Serial.println(F("va emite mai departe; starea lui sta in HEF, deci nici oprirea"));
+      Serial.println(F("alimentarii nu ajuta. Recuperare: butonul 2 tinut 3 s pe senzor."));
       return;
     }
 
-    // Un device care nu a trimis nimic de la inrolare nu are cum sa
-    // primeasca RESET-ul: comanda calatoreste in fereastra de receptie pe
-    // care senzorul o deschide DUPA fiecare pachet al lui. Daca l-am marca
-    // oricum, inregistrarea ar ramane blocata in registru la nesfarsit, cu
-    // adresa ocupata, asteptand un pachet care poate nu vine niciodata.
-    // Nu il stergem noi in tacere: asta ar fi exact un `force` nedeclarat,
-    // iar diferenta dintre cele doua comenzi este tot rostul lor. Decizia
-    // ramane a omului, care stie daca senzorul este pornit sau nu.
+    /*
+     * Un device care nu a trimis nimic de la inrolare nu are cum sa
+     * primeasca RESET-ul: comanda calatoreste in fereastra de receptie pe
+     * care senzorul o deschide DUPA fiecare pachet al lui. Daca l-am marca
+     * oricum, inregistrarea ar ramane blocata in registru la nesfarsit.
+     * Nu il stergem noi in tacere: ar fi exact un `force` nedeclarat, iar
+     * diferenta dintre cele doua comenzi este tot rostul lor.
+     */
     if (!device->hasUplink) {
-      Serial.print(F("Device-ul "));
-      SensorPacketCodec::printEui(eui);
-      Serial.println(F(" nu a trimis niciun pachet de la inrolare."));
-      Serial.println(F("Probabil este oprit sau in afara razei. CMD_DOWN(RESET) pleaca doar ca"));
-      Serial.println(F("raspuns la un pachet al lui, deci o dezinrolare curata este imposibila acum."));
-      Serial.println(F("Ai doua variante:"));
-      Serial.println(F("  - porneste senzorul si repeta 'remove <DevEUI>' cat timp emite (curat), sau"));
-      Serial.println(F("  - 'remove <DevEUI> force' ca sa il stergi doar local; senzorul pastreaza"));
-      Serial.println(F("    inrolarea si va trebui recuperat de la butonul 2."));
+      Serial.println(F("Device-ul nu a trimis niciun pachet de la inrolare, deci nu are cum sa"));
+      Serial.println(F("primeasca RESET-ul: el pleaca doar ca raspuns la un pachet al lui."));
+      Serial.println(F("Ori il pornesti si repeti comanda cat timp emite (curat), ori"));
+      Serial.println(F("'remove ... force' ca sa il stergi doar local."));
       return;
     }
 
@@ -211,70 +295,17 @@ namespace SerialConsole {
     DeviceRegistry::save();
 
     Serial.print(F("Marcat pentru dezinrolare: Senzor #"));
-    Serial.print(device->devAddr);
-    Serial.print(F(", DevEUI "));
-    SensorPacketCodec::printEui(eui);
-    Serial.println();
-    Serial.println(F("La FIECARE pachet al lui primeste cate un CMD_DOWN(RESET); se insista cat"));
-    Serial.println(F("timp se aude, fiindca un senzor care inca emite nu a primit comanda."));
-    Serial.print(F("Dezinrolarea se confirma abia dupa ce senzorul tace "));
+    Serial.println(device->devAddr);
+    Serial.println(F("Primeste CMD_DOWN(RESET) la FIECARE pachet al lui; se insista cat timp"));
+    Serial.println(F("se aude, fiindca un senzor care inca emite nu a primit comanda."));
+    Serial.print(F("Se confirma abia dupa ce tace "));
     Serial.print(REMOVE_CONFIRM_SILENCE_MS / 1000UL);
-    Serial.println(F(" s - abia atunci dispare"));
-    Serial.println(F("din registru. Pana atunci pachetele lui nu mai sunt afisate ca masuratori."));
+    Serial.println(F(" s - atunci dispare din registru."));
   }
 
-  static void commandReboot() {
-    Serial.println(F("Repornesc. Salvez registrul si adorm radioul..."));
-    SensorLink::stop();          // face si DeviceRegistry::save()
-    Serial.flush();
-    ESP.restart();
-  }
-
-  static void commandNet() {
-    NetLink::printStatus();
-
-    if (!NetLink::isUp()) {
-      Serial.println(F("Incerc din nou sa iau un IP..."));
-      if (NetLink::retry()) {
-        Serial.println(F("Legatura este acum sus."));
-      }
-    }
-  }
-
-  /*
-   * Stergerea identitatii cere confirmare explicita, ca `remove ... force`.
-   *
-   * Nu este doar curatenie locala: dupa ea hub-ul cere din nou
-   * /api/device/provision pentru acelasi deviceUid. Daca endpoint-ul nu
-   * este idempotent - lucru neconfirmat cu backend-ul - asta inseamna un
-   * hub nou pe server si istoricul vechi orfan.
-   */
-  static void commandForget(const String& argument) {
-    if (!argument.equalsIgnoreCase("yes")) {
-      Serial.println(F("'forget' sterge identitatea hub-ului din flash: hubGuid, apiKey,"));
-      Serial.println(F("pairingCode si tot config-ul primit de la server."));
-      Serial.println(F("Dupa ea hub-ul va cere DIN NOU /api/device/provision pentru acelasi"));
-      Serial.println(F("deviceUid. Daca serverul nu trateaza asta idempotent, se poate crea un"));
-      Serial.println(F("hub nou si istoricul vechi ramane orfan."));
-      Serial.println(F("Senzorii inrolati NU sunt afectati - registrul lor este alt spatiu NVS."));
-      Serial.println(F("Daca chiar vrei asta, scrie: forget yes"));
-      return;
-    }
-
-    HubIdentity::clear();
-    Serial.println(F("Identitatea a fost stearsa din flash."));
-    Serial.println(F("Scrie 'provision' ca sa o ceri acum, sau 'reboot' ca sa o ceara la pornire."));
-  }
-
-  static void commandMem() {
-    Serial.print(F("Heap liber: "));
-    Serial.print(ESP.getFreeHeap());
-    Serial.print(F(" B   minim atins de la pornire: "));
-    Serial.print(ESP.getMinFreeHeap());
-    Serial.print(F(" B   uptime: "));
-    Serial.print(millis() / 1000UL);
-    Serial.println(F(" s"));
-  }
+  // -------------------------------------------------------------------
+  // Dispecerizare
+  // -------------------------------------------------------------------
 
   // Intoarce true daca linia a fost o comanda cunoscuta.
   static bool dispatch(const String& line) {
@@ -289,21 +320,9 @@ namespace SerialConsole {
     }
     command.toLowerCase();
 
-    if (command == "pair")        { SensorLink::enterPairingMode();     return true; }
-    if (command == "sensors")     { DeviceRegistry::printSensorTable(); return true; }
-    if (command == "list")        { DeviceRegistry::printAll();         return true; }
-    if (command == "provisioned") { DeviceRegistry::printProvisioned(); return true; }
-    if (command == "stats")       { SensorLink::printStats();
-                                    DeviceRegistry::printSensorTable(); return true; }
-    if (command == "remove")      { commandRemove(argument);            return true; }
-    if (command == "reboot")      { commandReboot();                    return true; }
-    if (command == "mem")         { commandMem();                       return true; }
-    if (command == "net")         { commandNet();                       return true; }
-    if (command == "hub")         { HubIdentity::print();               return true; }
-    if (command == "cloud")       { HubCloud::printStatus();            return true; }
-    if (command == "health")      { HubCloud::forceHealth();            return true; }
-    if (command == "provision")   { HubCloud::forceProvision();         return true; }
-    if (command == "forget")      { commandForget(argument);            return true; }
+    if (command == "pair")   { SensorLink::enterPairingMode(); return true; }
+    if (command == "status") { commandStatus();                return true; }
+    if (command == "remove") { commandRemove(argument);        return true; }
 
     if (command == "help" || command == "?" || command == "h") {
       printHelp();
@@ -323,29 +342,13 @@ namespace SerialConsole {
     Serial.println(F("  COMENZI"));
     printSeparator();
     Serial.println(F("  pair                deschide fereastra de inrolare"));
-    Serial.println(F("  sensors             tabelul locurilor: temperatura, varsta, RSSI, pierderi"));
-    Serial.println(F("  list                senzorii inrolati (registrul din NVS)"));
-    Serial.println(F("  provisioned         senzorii care au voie sa se inroleze (Config.h)"));
-    Serial.println(F("  remove <DevEUI>     il scoate din retea; ii trimite RESET la primul contact"));
-    Serial.println(F("  remove #3           acelasi lucru, dupa numarul senzorului"));
+    Serial.println(F("  status              senzorii, reteaua, cloud-ul si identitatea hub-ului"));
+    Serial.println(F("  remove <DevEUI|#n>  scoate un senzor din retea; RESET la primul contact"));
     Serial.println(F("  remove <...> force  il sterge imediat din registru, fara sa il anunte"));
-    Serial.println(F("  stats               contoarele legaturii radio"));
-    Serial.println(F("  net                 starea retelei; reincearca DHCP daca legatura e jos"));
-    Serial.println(F("  hub                 identitatea hub-ului (secretele mascate)"));
-    Serial.println(F("  cloud               starea bootstrap-ului: sanatate, provisioning, erori"));
-    Serial.println(F("  health              verifica acum serverul si baza de date"));
-    Serial.println(F("  provision           cere acum provisioning-ul (refuza daca e deja facut)"));
-    Serial.println(F("  forget yes          sterge identitatea din flash; senzorii NU sunt afectati"));
-    Serial.println(F("  mem                 heap liber si minimul atins de la pornire"));
-    Serial.println(F("  reboot              salveaza registrul si reporneste hub-ul"));
     Serial.println(F("  help                acest text"));
     printSeparator();
     Serial.println(F("Serial Monitor: 115200 baud, terminator de linie \"Newline\"."));
     Serial.println(F("Merge si pe \"No line ending\" - comanda se preia dupa o scurta pauza."));
-    Serial.println();
-    Serial.println(F("DevEUI se scrie ca 16 cifre hexazecimale, ex: 534F4C5649580001."));
-    Serial.println(F("Numarul senzorului ('#3' sau '3') este acelasi lucru cu DevAddr si este"));
-    Serial.println(F("pozitia placii in tabelul de provisioning din Config.h."));
     Serial.println();
   }
 
@@ -356,10 +359,6 @@ namespace SerialConsole {
     printHelp();
   }
 
-  /*
-   * Un octet per apel, si atat. Vezi regula 1 din antetul fisierului:
-   * nimic de aici nu are voie sa astepte tastatura.
-   */
   // Linia s-a incheiat: se executa si tamponul se goleste.
   static void executeLine() {
     s_line[s_len] = '\0';
@@ -368,7 +367,7 @@ namespace SerialConsole {
 
     if (s_overflow) {
       s_overflow = false;
-      Serial.println(F("Linie prea lunga, ignorata. Cea mai lunga comanda are 25 de caractere."));
+      Serial.println(F("Linie prea lunga, ignorata."));
       return;
     }
 

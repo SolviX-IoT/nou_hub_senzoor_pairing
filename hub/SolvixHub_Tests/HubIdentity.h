@@ -37,11 +37,22 @@
 #include <Arduino.h>
 #include "Config.h"
 
-// Cele 11 valori de configurare trimise de server, in obiectul "config".
+// Valorile de configurare trimise de server: 11 in obiectul "config" al
+// provisioning-ului, 12 in raspunsul lui GET /api/device/config.
 //
-// SE SALVEAZA, DAR NU SE FOLOSESC INCA. Heartbeat-ul si telemetria sunt
-// etapa urmatoare; a implementa pe jumatate comportamente comandate de
-// aici ar produce exact genul de purtare pe care nimeni nu o poate testa.
+// DIN ELE SE FOLOSESC DOUA: heartbeatIntervalSeconds si
+// heartbeatTimeoutSeconds, amandoua in HubHeartbeat - primul da ritmul
+// batailor, al doilea spune dupa cat timp de tacere serverul ne considera
+// cazuti. Niciunul nu este crezut pe cuvant: ritmul trece prin
+// HEARTBEAT_MIN_INTERVAL_S / HEARTBEAT_MAX_INTERVAL_S din Config.h,
+// fiindca un parametru primit prin retea nu are voie sa opreasca receptia
+// radio.
+//
+// CELELALTE NOUA SE SALVEAZA SI NU SE FOLOSESC. Telemetria in loturi
+// (cloudSyncIntervalSeconds, maxBatchSize) si actualizarea de firmware
+// sunt etapa urmatoare; a implementa pe jumatate comportamente comandate
+// de aici ar produce exact genul de purtare pe care nimeni nu o poate
+// testa.
 struct HubConfig {
   uint16_t heartbeatIntervalSeconds;
   uint16_t heartbeatTimeoutSeconds;
@@ -54,6 +65,30 @@ struct HubConfig {
   uint8_t  maxRetryAttempts;
   bool     offlineStorageEnabled;
   bool     autoFirmwareUpdate;
+
+  /*
+   * ADAUGAT LA COADA, SI ACOLO TREBUIE SA RAMANA.
+   *
+   * Campul asta nu vine din provisioning, ci doar din GET
+   * /api/device/config, deci a aparut dupa ce existau deja hub-uri cu
+   * identitatea salvata in NVS. Faptul ca sta ULTIMUL este ceea ce face
+   * ca acele hub-uri sa NU trebuiasca sa se re-provizioneze:
+   *
+   *   Preferences::getBytes() citeste fara reproset un blob mai SCURT
+   *   decat structura (esueaza doar cand e mai lung), iar loadFromNvs()
+   *   face memset pe tot inainte. Blobul vechi de 20 de octeti intra deci
+   *   peste primii 20, fiecare camp la offset-ul lui neschimbat, iar
+   *   campul asta ramane 0 - exact ce inseamna "serverul nu mi-a spus
+   *   inca". Prima actualizare de config ii da valoarea adevarata.
+   *
+   * De aceea IDENTITY_BLOB_VERSION a ramas 1. Un camp INSERAT la mijloc,
+   * sau o reordonare, ar deplasa toate offset-urile de dupa el: blobul
+   * vechi s-ar citi strambat, in tacere, si ar trebui crescuta versiunea
+   * - adica exact re-provisioning-ul pe care Config.h avertizeaza sa nu
+   * il declansezi cat timp idempotenta lui /api/device/provision nu e
+   * confirmata. Camp nou = la coada.
+   */
+  uint16_t maxOfflineMessages;
 };
 
 struct HubIdentityData {
@@ -123,13 +158,24 @@ namespace HubIdentity {
   // Scrie identitatea in NVS. Versiunea se pune ultima, dinadins.
   bool store(const HubIdentityData& identity);
 
-  // Sterge identitatea din NVS. Versiunea se sterge prima.
-  void clear();
+  /*
+   * Inlocuieste DOAR blocul de configurare, pastrand identitatea neatinsa.
+   * Pentru GET /api/device/config, care aduce configul nou fara sa spuna
+   * nimic despre hubGuid, apiKey sau restul.
+   *
+   * Nu atinge KEY_VERSION: identitatea era deja completa si valida
+   * inainte de apel si ramane asa. Disciplina "versiunea se scrie ultima"
+   * apara scrierea unei identitati NOI de o pana de curent; aici nu se
+   * scrie o identitate, ci se schimba un camp al uneia existente, iar
+   * stergerea versiunii ar face exact raul de care ne temem - un hub
+   * perfect provizionat care se trezeste crezandu-se gol.
+   *
+   * Un singur nvs_set_blob, deci cel mai rau caz al unei pene de curent
+   * este configul vechi, nu unul pe jumatate.
+   */
+  bool storeConfig(const HubConfig& config);
 
-  // Afiseaza identitatea pe Serial, CU SECRETELE MASCATE (regula 12 din
-  // CLAUDE.md). apiKey si pairingCode apar ca prefix + sufix + lungime;
-  // provisioningSecret nu apare deloc, nici macar ca lungime.
-  void print();
+
 }
 
 #endif // HUB_IDENTITY_H

@@ -9,7 +9,7 @@
 > - **[MEMORY.md](MEMORY.md)** — starea de acum: cifrele de incadrare,
 >   versiunile de format, ce se schimba la fiecare placa. Citeste-l cand
 >   intrebi "unde am ramas" sau cand verifici ce s-a programat pe cip.
-> - **[ISTORIC.md](ISTORIC.md)** — arhiva `F-001…F-045`: simptom, cauza, fix.
+> - **[ISTORIC.md](ISTORIC.md)** — arhiva `F-001…F-046`: simptom, cauza, fix.
 >   Citeste-l cand un mesaj de commit citeaza o eticheta `F-0xx`, cand vrei
 >   motivul din spatele unei decizii, sau cand un simptom pare cunoscut.
 >
@@ -330,26 +330,50 @@ manual — numarul primit inapoi ramane insa acelasi (F-037).
 
 ### 5.2. `hub/SolvixHub_Tests/` — sketch Arduino
 
-**Nu mai este o suita de teste.** Meniul de cifre si cele sapte teste
-independente au disparut la 2026-09-01 (F-039); hub-ul porneste singur si
-ruleaza permanent. Ce era „testul 8" este acum runtime-ul `SensorLink`.
+**Hub-ul face doua lucruri, si atat:** se inregistreaza in retea
+(bootstrap-ul in cloud, apoi un heartbeat periodic) si vorbeste cu senzorii.
+Suita de teste a disparut la 2026-09-01 (F-039), iar restul de suprafata —
+comenzi de diagnostic, contoare si cod ramas fara apelanti — la aceeasi data
+(F-046).
+
+Consola are **trei comenzi**: `pair`, `status`, `remove`. `status` arata
+tot: tabelul senzorilor, o linie de retea, una de cloud, una de **puls**
+(cand a fost ultimul heartbeat reusit) si identitatea hub-ului, cu
+`pairingCode` intreg si **fara `apiKey`**.
+
+**De ce 28 de fisiere.** Sketch-ul are **13 module**, fiecare cu perechea lui:
+`.h` este ce ofera modulul celorlalti, `.cpp` este cum face. Peste ele,
+`Config.h` (numai valori, deci fara `.cpp`) si `.ino`-ul. **Numarul de
+fisiere nu are niciun efect asupra firmware-ului** — aceiasi octeti ies si
+dintr-unul singur, si din 28; impartirea exista pentru citit si pentru
+granite, nu pentru compilator.
+
+Doua module **nu se topesc in altceva**, indiferent cate tab-uri ar
+economisi: `SensorPacket`, fiindca este oglinda sectiunii 4 din
+`senzor/main.c` iar regula 9 cere ca cele doua sa se modifice impreuna — un
+fisier cu nume propriu face perechea evidenta; si `SpiBus`, fiindca este o
+constrangere fizica a placii si merita sa se vada ca atare. Daca vreodata se
+doreste totusi comasarea, singurii candidati sunt `LoRaRadio` (folosit doar
+de `SensorLink`) si `Http` (folosit doar de `HubCloud`) — restul au mai
+multi utilizatori.
 
 | Fisier | Rol |
 |--------|-----|
-| `SolvixHub_Tests.ino` | Doar `setup()`, `loop()` si butonul 1. `setup()` merge in ordinea Leds -> SpiBus -> registru -> identitate -> **SensorLink (radioul asculta)** -> NetLink -> HubCloud -> consola: radioul porneste inaintea retelei, iar **esecul retelei nu opreste boot-ul**. `loop()` nu contine nimic blocant |
-| `Config.h` | **Singura sursa de adevar pentru pini** si constante: SPI, ETH, LoRa, butoane, LED-uri, sectiunea de pairing (`PAIRING_MODE_TIMEOUT_MS`, `PAIRING_SEND_ACK`, `REMOVE_CONFIRM_SILENCE_MS`, `REGISTRY_*`), sectiunea multi-senzor (`HUB_MAX_SENSORS`, `SENSOR_OFFLINE_MS`, `SENSOR_FCNT_GAP_RESTART`, `PROVISIONED_DEVICES_INIT` — **ordinea randurilor da numarul fiecarui senzor**), si **sectiunile noi RETEAUA si CLOUD**: `HUB_NET_TRANSPORT`, `ETH_DHCP_*`, `SPI_BUS_ASSERT`, parametrii de fabrica ai hub-ului, `CLOUD_*`, `HTTP_*`, `IDENTITY_NVS_NAMESPACE` |
-| `SpiBus.*` | Arbitrajul magistralei partajate; `SpiGuard` ridica CS-ul in destructor. **Nou:** `SpiBus::Owner` — un assert de depanare, nu un lacat, care se plange daca un modul cere magistrala fara ca celalalt sa o fi eliberat (F-041) |
-| `Console.*` | Fostul `TestBase.*`. Structura `Test` a disparut; au ramas `printSeparator()`, `printTitle()`, `printHexByte()` |
-| `LoRaRadio.*` | Invelis peste libraria LoRa: `begin()`, `sendText()`, `sendRaw()`, `receive()`, `receiveRaw()`, `sleep()`. Receptia e prin polling |
+| `SolvixHub_Tests.ino` | Doar `setup()`, `loop()` si butonul 1. `setup()` merge in ordinea Leds -> SpiBus -> registru -> identitate -> **SensorLink (radioul asculta)** -> NetLink -> HubCloud -> HubHeartbeat -> consola: radioul porneste inaintea retelei, iar **esecul retelei nu opreste boot-ul**. `loop()` nu contine nimic blocant |
+| `Config.h` | **Singura sursa de adevar pentru pini** si constante: SPI, ETH, LoRa, butoane, LED-uri, sectiunea de pairing (`PAIRING_MODE_TIMEOUT_MS`, `PAIRING_SEND_ACK`, `REMOVE_CONFIRM_SILENCE_MS`, `REGISTRY_*`), sectiunea multi-senzor (`HUB_MAX_SENSORS`, `SENSOR_OFFLINE_MS`, `SENSOR_FCNT_GAP_RESTART`, `PROVISIONED_DEVICES_INIT` — **ordinea randurilor da numarul fiecarui senzor**), si sectiunile RETEAUA si CLOUD: `HUB_NET_TRANSPORT`, `ETH_DHCP_*`, parametrii de fabrica ai hub-ului, `CLOUD_*`, `HTTP_*`, `IDENTITY_NVS_NAMESPACE`, si sectiunea HEARTBEAT (`CLOUD_PATH_HEARTBEAT`, `CLOUD_API_KEY_HEADER`, `HEARTBEAT_MIN_INTERVAL_S` / `HEARTBEAT_MAX_INTERVAL_S` — **marginile in care se accepta ritmul cerut de server**) |
+| `SpiBus.*` | Arbitrajul magistralei partajate: `begin()` o singura data, `claimEthernet()`/`claimLoRa()`, resetul celor doua module. Sunt **preconditii, nu lacate** — bibliotecile isi coboara singure CS-ul |
+| `Console.*` | `printSeparator()` si `printTitle()` |
+| `LoRaRadio.*` | Invelis peste libraria LoRa: `begin()`, `sendRaw()`, `receiveRaw()`, `sleep()`. Numai variante binare, fara `String` (F-019). Receptia e prin polling |
 | `Leds.*` | Cele doua LED-uri. `set()`, `pulse()`, `service()` fara `delay()` |
 | `SensorPacket.*` | **Oglinda protocolului din `senzor/main.c`**: constantele tuturor tipurilor, `decode()`/`print()`/`printRaw()`, `messageType()`, `parseJoinRequest()`, `parseData()`, `buildJoinAccept()`, `buildCommand()`, `printEui()` |
 | `DeviceRegistry.*` | Registrul pe NVS (`solvix-pair`); `isProvisioned()`, **`addressForEui()`** (numarul din pozitia in tabel, F-037), `printSensorTable()` — vederea de zi cu zi, toate locurile, si cele goale |
-| `SensorLink.*` | Fostul `TestPairing.*`, acum **runtime permanent**: fereastra de pairing, `JOIN_REQ` -> `JOIN_ACCEPT`, `DATA_UP` -> `decode()`, `CMD_DOWN` (ACK/RESET), dezinrolarea confirmata (`sendRemovalReset()` + `servicePendingRemovals()`, F-031), `printSensorTag()`, golurile de frame counter, `serviceOfflineWatch()`. **Nou:** `lastRxMs()` si `hasPendingRemoval()`, cele doua porti prin care trece orice altceva lung din `loop()`; `onReading()`, carligul pentru telemetrie; ACK-ul pleaca acum **inaintea** blocului de log (F-040) |
-| `NetLink.*` | Fostul `EthernetLink.*`, acum agnostic de transport. `acquireClient()` / `releaseClient()` intorc un `Client*` si sunt **si granita magistralei SPI**, deci `Http` nu afla niciodata pe ce transport merge. Ethernet azi, WiFi printr-un `#elif` mai tarziu, fara schimbari la apelanti. Aici e definit `HUB_MAC`. `httpPing()` a disparut |
-| `Http.*` | **NOU.** GET si POST peste un `Client&`, fara niciun `String`: linie de status, antete plafonate, corp marginit, **de-chunker** (serverul raspunde `Transfer-Encoding: chunked`, F-042), `Result` cu status/lungime/durata. Numele nu este `HttpClient.h`, ca sa nu ascunda antetul bibliotecii cu acel nume (aceeasi capcana ca F-021) |
-| `HubIdentity.*` | **NOU.** Identitatea primita de la cloud, in NVS (`solvix-hub`, separat de registru): `hubGuid`, `apiKey`, `pairingCode`, `lifecycleStatus`, `provisionedAt`, `maxSensors` si cele 11 valori de `config`. Versiunea se scrie **ultima** si se sterge **prima**, ca o identitate pe jumatate scrisa sa arate ca una lipsa. `print()` mascheaza `apiKey`; `provisioningSecret` nu se afiseaza deloc |
-| `HubCloud.*` | **NOU.** Masina de stari a bootstrap-ului: `NetWait` -> `Health` -> `Provision` -> `Ready`, cu backoff 5/10/30/60 s. Sanatatea se judeca dupa `"database": "Reachable"`, nu dupa `"status"`. Cererile sunt blocante dar trec prin cele doua porti din `SensorLink` |
-| `SerialConsole.*` | **NOU.** Comenzile de pe Serial, mutate din `.ino`. Citeste **un octet per apel** — `readStringUntil()` bloca pana la o secunda peste o fereastra de downlink (F-040) |
+| `SensorLink.*` | **Runtime-ul permanent** (fostul „test 8"): fereastra de pairing, `JOIN_REQ` -> `JOIN_ACCEPT`, `DATA_UP` -> `decode()`, `CMD_DOWN` (ACK/RESET), dezinrolarea confirmata prin tacere (F-031), golurile de frame counter, `serviceOfflineWatch()`. `lastRxMs()` si `hasPendingRemoval()` sunt **cele doua porti** prin care trece orice altceva lung din `loop()`; ACK-ul pleaca **inaintea** blocului de log (F-040) |
+| `NetLink.*` | Reteaua, agnostica de transport. `acquireClient()` / `releaseClient()` intorc un `Client*` si sunt **si granita magistralei SPI**, deci `Http` nu afla niciodata pe ce transport merge. Ethernet azi, WiFi printr-un `#elif` mai tarziu, fara schimbari la apelanti. Aici e definit `HUB_MAC` |
+| `Http.*` | GET si POST peste un `Client&`, fara niciun `String`: linie de status, antete plafonate, corp marginit, **de-chunker** (serverul raspunde `Transfer-Encoding: chunked`, F-042), `Retry-After`. Numele nu este `HttpClient.h`, ca sa nu ascunda antetul bibliotecii cu acel nume (aceeasi capcana ca F-021) |
+| `HubIdentity.*` | Identitatea primita de la cloud, in NVS (`solvix-hub`, separat de registru): `hubGuid`, `apiKey`, `pairingCode`, `lifecycleStatus`, `provisionedAt`, `maxSensors` si valorile de `config` (11 de la provisioning, 12 de la `/api/device/config`) — din ele se folosesc **doua**, `heartbeatIntervalSeconds` si `heartbeatTimeoutSeconds` (in `HubHeartbeat`); restul de zece raman salvate si nefolosite. `storeConfig()` inlocuieste **numai** blocul de configurare, fara sa atinga versiunea: identitatea era deja valida si ramane asa. **`maxOfflineMessages` sta ULTIMUL in `HubConfig` si acolo ramane** — asa un blob vechi de 20 de octeti se citeste corect peste structura de 22 si `IDENTITY_BLOB_VERSION` nu trebuie crescut; un camp inserat la mijloc ar deplasa offset-urile in tacere. Versiunea se scrie **ultima** si se sterge **prima**, ca o identitate pe jumatate scrisa sa arate ca una lipsa. Dimensiunile campurilor isi poarta marja in comentariu (F-044) |
+| `HubCloud.*` | Masina de stari a bootstrap-ului: `NetWait` -> `Health` -> `Provision` -> `Ready`, cu backoff 5/10/30/60 s si contoare separate pe cele doua cai (F-043). Sanatatea se judeca dupa `"database": "Reachable"`, nu dupa `"status"`. Un 429 primeste pauza lui lunga; `Blocked` este si el o asteptare de 30 de minute, nu o fundatura (F-046). Cererile sunt blocante dar trec prin cele doua porti din `SensorLink` |
+| `HubHeartbeat.*` | Semnul de viata: `POST /api/device/heartbeat` la fiecare `heartbeatIntervalSeconds`, autentificat cu `X-Solvix-ApiKey` (**singurul lucru din cerere care spune cine bate** — corpul nu poarta niciun identificator). Porneste abia din `HubCloud::Ready`. `heartbeatTimeoutSeconds` este toleranta serverului: se verifica la pornire ca ritmul incape in ea, si in rulare se anunta cand nu mai incape — altfel hub-ul apare mort in aplicatie cu totul functional pe masa. La `configUpdateRequired` cere `GET /api/device/config`, salveaza prin `HubIdentity::storeConfig()` si **schimba ritmul pe loc**, fara repornire. Doua reguli: **cel mult o cerere per `tick()`** (doua blocante la rand ar dubla surzenia; configul are prioritate) si **cel mult o preluare per `configVersion` anuntata** — garda impotriva unui server care nu stinge steagul. `pendingCommandCount` doar se raporteaza: pentru comenzi inca nu exista endpoint |
+| `SerialConsole.*` | Cele trei comenzi. Citeste **cel mult 32 de octeti per apel** si incheie linia si dupa liniste, nu doar la Enter — altfel pe „No line ending" nu s-ar executa nimic (F-045) |
 | `README.md` | Instructiuni de utilizare, comenzile, secventa de pornire, tabelul SPI, note hardware |
 
 ---

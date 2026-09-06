@@ -40,19 +40,6 @@ namespace LoRaRadio {
     return s_ready;
   }
 
-  bool sendText(const String& text) {
-    if (!s_ready) return false;
-
-    SpiBus::claimLoRa();
-    bool ok = false;
-    if (LoRa.beginPacket()) {
-      LoRa.print(text);
-      ok = (LoRa.endPacket() == 1);
-    }
-    SpiBus::deselectAll();
-    return ok;
-  }
-
   bool sendRaw(const uint8_t* data, uint8_t length) {
     if (!s_ready) return false;
 
@@ -70,25 +57,6 @@ namespace LoRaRadio {
     // reintra in receptie la urmatorul parsePacket(), deci nu e nevoie de
     // nimic aici.
     return ok;
-  }
-
-  bool receive(String& out, int& rssi, float& snr) {
-    if (!s_ready) return false;
-
-    SpiBus::claimLoRa();
-    bool got = false;
-    int size = LoRa.parsePacket();
-    if (size > 0) {
-      out = "";
-      while (LoRa.available()) {
-        out += (char)LoRa.read();
-      }
-      rssi = LoRa.packetRssi();
-      snr  = LoRa.packetSnr();
-      got = true;
-    }
-    SpiBus::deselectAll();
-    return got;
   }
 
   bool receiveRaw(uint8_t* buffer, int maxLength, int& length,

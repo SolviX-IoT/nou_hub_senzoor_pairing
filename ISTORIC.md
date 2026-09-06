@@ -127,6 +127,7 @@ doar prin modulul `Leds`, si nu se apeleaza niciodata `LoRa.end()` /
 | 2026-09-01 | F-043 | Prima rulare cu serverul real: backoff-ul nu crestea si hub-ul isi intretinea singur blocajul de rate limiting |
 | 2026-09-01 | F-044 | Campurile identitatii, dimensionate din estimare: lifecycleStatus nu incapea cu un caracter |
 | 2026-09-01 | F-045 | Consola neblocanta nu executa nicio comanda pe "No line ending" - regresie din F-040 |
+| 2026-09-01 | F-046 | Curatenie: consola redusa la 3 comenzi, cod mort scos, Blocked devine asteptare lunga |
 
 ### 2.1. 2026-08-26 — TPL5110 scos din proiectare *(fara eticheta F)*
 
@@ -151,7 +152,7 @@ Castigul de memorie este cel asteptat de la trei scrieri de registre:
 
 ---
 
-## 3. Catalogul F-001 … F-045
+## 3. Catalogul F-001 … F-046
 
 Fiecare intrare spune **simptomul**, **cauza** si **fixul**, ca sa nu se repete
 aceleasi greseli.
@@ -667,6 +668,57 @@ aceleasi greseli.
   aparea in niciun comentariu si de care depindea o configuratie
   implicita. Inainte de a scoate ceva "care doar blocheaza", intreaba ce
   altceva mai facea acel blocaj.
+
+### F-046 — Curatenie: hub-ul redus la inregistrarea in retea si comunicarea cu senzorii
+- **Nu este un bug, este o taiere ceruta.** Se noteaza fiindca sterge cod
+  care a existat si fiindca doua dintre stergeri au consecinte care nu se
+  vad din diff.
+- **Ce s-a scos:**
+  - **consola, de la 15 comenzi la 3.** Au ramas `pair`, `status` si
+    `remove` (plus `help`). Au disparut `sensors`, `list`, `provisioned`,
+    `stats`, `net`, `hub`, `cloud`, `health`, `provision`, `forget`,
+    `mem`, `reboot`. `status` le inlocuieste pe cele sapte de afisare:
+    tabelul senzorilor, o linie de retea, o linie de cloud si identitatea
+    hub-ului;
+  - **assert-ul `SpiBus::Owner`** (F-041), cu tot cu `SPI_BUS_ASSERT`;
+  - **`SpiGuard`**, `printHexByte()`, `ETH_SPI_HZ*`,
+    `LoRaRadio::sendText()` si `receive()`, `NetLink::resolve()`,
+    `connectionsOpened()`, `dhcpRenewals()`, `SensorLink::isRunning()`,
+    `onReading()`, `stop()`, `printStats()` si cele sapte contoare care
+    nu mai erau citite de nimeni, `DeviceRegistry::printAll()` si
+    `printProvisioned()`, `HubIdentity::print()` si `clear()`,
+    `HubCloud::printStatus()`, `forceHealth()` si `forceProvision()`.
+- **PRIMA CONSECINTA, si a cerut o schimbare de comportament:**
+  `HubCloud` intra in `State::Blocked` dupa
+  `CLOUD_PROVISION_MAX_ATTEMPTS` = 5 esecuri, si **singura iesire era
+  comanda `provision`** (F-043). Stearsa comanda, `Blocked` ar fi devenit
+  o fundatura reala: hub-ul ar fi ramas acolo pana la reprogramare, exact
+  in cazul in care se ajunge acolo cel mai des — serverul care ne-a
+  limitat cu 429.
+
+  `Blocked` este acum doar treapta cea mai lunga de asteptare:
+  `CLOUD_BLOCKED_RETRY_MS` = 30 de minute, apoi se reintra singur in
+  `Health` cu contoarele pe zero. Castigul din F-043 ramane intreg — nu se
+  mai hamareste serverul la 11 secunde — dar hub-ul isi revine fara nicio
+  interventie.
+- **A DOUA CONSECINTA:** `pairingCode` ar fi devenit invizibil odata cu
+  comanda `hub`. El exista ca sa fie **citit de un om si tastat in
+  aplicatie** ca sa revendice hub-ul; un cod de revendicare pe care nu il
+  poate citi nimeni nu isi mai face treaba. A intrat deci in `status`,
+  afisat intreg, alaturi de `hubGuid` si `lifecycleStatus`. `apiKey` nu se
+  mai afiseaza deloc, nici macar mascat: pe el nu are de ce sa il citeasca
+  nimeni.
+- **Ce NU s-a atins, dinadins:** `SensorPacket.*` (oglinda protocolului din
+  `senzor/main.c`), structura `DeviceRecord` si `REGISTRY_BLOB_VERSION` = 4
+  — o schimbare acolo ar fi cerut reinrolarea manuala a fiecarui senzor din
+  teren (F-037) — layout-ul NVS al identitatii si
+  `IDENTITY_BLOB_VERSION` = 1, cele doua porti din `loop()`, ordinea din
+  `setup()` si LED-urile.
+- **Cifre:** 5532 -> ~5000 de linii. Flash 358,7 kB -> 349,8 kB (-8,9 kB).
+- **De retinut:** cand tai o comanda, intreaba intai **ce stare din
+  program depindea de ea ca sa poata fi parasita**. Aici o singura
+  stergere ar fi transformat o stare temporara intr-una permanenta, si
+  nimic din diff nu ar fi aratat asta.
 
 ## 4. Criterii de acceptanta
 

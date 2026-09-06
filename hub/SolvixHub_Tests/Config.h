@@ -88,11 +88,13 @@
 // ---------------------------------------------------------------------
 #define SERIAL_BAUD    115200
 
-// Viteza SPI folosita cand vorbim cu ENC28J60.
-// Datasheet-ul admite pana la 20 MHz; 8 MHz este un compromis sigur pe
-// cablaje de prototip. Pentru diagnostic se coboara la 1 MHz.
-#define ETH_SPI_HZ         8000000
-#define ETH_SPI_HZ_DEBUG   1000000
+// NOTA despre viteza SPI a ENC28J60: nu se configureaza de aici si nu se
+// poate. EthernetENC are SPISettings(20000000, ...) scris in cod
+// (utility/Enc28J60Network.cpp) si ignora orice valoare am pune noi. Au
+// existat aici ETH_SPI_HZ si ETH_SPI_HZ_DEBUG; le foloseau doar testele,
+// iar dupa stergerea lor nu mai insemnau nimic. 20 MHz este optimist pe
+// cablaje de prototip: daca apar vreodata raspunsuri corupte sau DHCP
+// instabil, acesta este primul suspect, si se schimba in librarie.
 
 // Adresa MAC folosita de placa in retea (poate fi orice, dar trebuie
 // sa fie unica in reteaua locala).
@@ -328,16 +330,6 @@ extern byte HUB_MAC[6];
 // linia aceea in jurnal prima data cand se intampla pe hardware real.
 #define ETH_MAINTAIN_WARN_MS    200UL
 
-// 1 = SpiBus tine minte cine a cerut ultima data magistrala si se plange
-//     daca celalalt modul o cere fara ca primul sa fi eliberat-o.
-//
-// NU este un lacat si nu poate impiedica nimic: bibliotecile isi coboara
-// singure CS-ul, din propriul cod. Este un assert, si prinde exact clasa
-// de greseala pe care o face codul nou de retea - un deselectAll() uitat
-// pe o cale de return timpuriu. Se lasa pe 1 cat timp se lucreaza la
-// retea; costa un octet de stare si un test compilat conditionat.
-#define SPI_BUS_ASSERT          1
-
 // =====================================================================
 // CLOUD - identitatea hub-ului si API-ul
 // =====================================================================
@@ -449,6 +441,20 @@ extern byte HUB_MAC[6];
 // nou dupa ce s-a lamurit cauza. Radioul ramane pornit tot timpul.
 #define CLOUD_PROVISION_MAX_ATTEMPTS 5
 
+// Cat asteapta hub-ul in starea Blocked inainte sa mai incerce o data.
+//
+// Blocked a fost la inceput o oprire definitiva, din care iesea numai
+// comanda `provision`. De cand consola s-a redus la trei comenzi si aceea
+// nu mai exista, o oprire definitiva ar insemna un hub care ramane blocat
+// pana la reprogramare - exact in cazul in care se ajunge acolo cel mai
+// des, adica atunci cand serverul ne-a limitat (429).
+//
+// Asa ca Blocked este acum doar treapta cea mai lunga de asteptare. O
+// jumatate de ora este destul de rar cat sa nu mai hamareasca nimic (tot
+// castigul din F-043 ramane) si destul de des cat un hub lasat peste
+// noapte sa se provizioneze singur imediat ce serverul il lasa.
+#define CLOUD_BLOCKED_RETRY_MS       1800000UL
+
 // La cat timp se reaminteste pe Serial ca hub-ul inca nu e provizionat.
 #define CLOUD_NAG_EVERY_MS        600000UL
 
@@ -467,5 +473,119 @@ extern byte HUB_MAC[6];
 // istoricul vechi orfan. De confirmat cu backend-ul inainte de a creste
 // vreodata numarul.
 #define IDENTITY_BLOB_VERSION     1
+
+// =====================================================================
+// HEARTBEAT - semnul de viata periodic catre server
+// =====================================================================
+// POST /api/device/heartbeat, la fiecare heartbeatIntervalSeconds.
+//
+// CELE DOUA VALORI CARE DAU RITMUL NU STAU AICI. heartbeatIntervalSeconds
+// si heartbeatTimeoutSeconds vin de la server, in obiectul "config" al
+// raspunsului de provisioning, si traiesc in HubIdentity. Sunt primele
+// doua valori din acel obiect care chiar se folosesc la ceva; celelalte
+// zece raman salvate si nefolosite.
+//
+// Aici stau doar MARGINILE in care hub-ul accepta ce i se cere, si
+// valoarea de rezerva pentru cazul in care serverul nu a trimis nimic.
+// Un parametru primit prin retea nu are voie sa poata opri produsul -
+// acelasi principiu ca la maxSensors, care nu inlocuieste HUB_MAX_SENSORS.
+
+#define CLOUD_PATH_HEARTBEAT      "/api/device/heartbeat"
+
+// Configul, cerut cu GET si FARA corp, cu acelasi antet de cheie.
+//
+// Se cere DOAR cand un heartbeat a raspuns cu configUpdateRequired=true,
+// niciodata periodic si niciodata la pornire: la pornire configul salvat
+// in NVS este prin definitie ultimul primit, iar prima bataie spune daca
+// s-a schimbat ceva cat timp hub-ul a fost oprit.
+#define CLOUD_PATH_CONFIG         "/api/device/config"
+
+// Antetul de autentificare al heartbeat-ului: cheia PER HUB primita la
+// provisioning, nu cheia globala de admin din CLOUD_ADMIN_KEY. Ea este si
+// singurul lucru din cerere care spune serverului CINE bate - corpul nu
+// contine niciun identificator de hub.
+//
+// VALOAREA NU SE AFISEAZA NICIODATA PE Serial (regula 11 din CLAUDE.md).
+// Antetul se compune intr-un tampon si se da direct lui Http; jurnalul
+// spune cel mult ca exista o cheie, niciodata continutul ei.
+#define CLOUD_API_KEY_HEADER      "X-Solvix-ApiKey"
+
+// Ritmul folosit cand serverul nu a trimis heartbeatIntervalSeconds -
+// adica valoarea a ramas 0, fie intr-o identitate salvata inainte ca
+// obiectul "config" sa existe, fie intr-un raspuns incomplet.
+#define HEARTBEAT_DEFAULT_INTERVAL_S  60UL
+
+// PODEAUA. Sub atat nu se coboara, indiferent ce cere serverul prin
+// heartbeatIntervalSeconds sau prin nextHeartbeatInSeconds.
+//
+// NU ESTE O PREFERINTA, ESTE O PROTECTIE A PRODUSULUI. Cat dureaza o
+// cerere HTTP hub-ul este SURD - pana la HTTP_BUDGET_MS = 2500 ms - iar
+// LoRa.parsePacket() lucreaza in RX_SINGLE, care expira dupa ~102 ms:
+// pachetele din intervalul acela nu se acumuleaza nicaieri, se pierd de
+// tot. Un server care ar cere un heartbeat pe secunda ar tine hub-ul surd
+// mai mult de jumatate din timp si ar opri practic receptia, fara ca
+// nimeni sa lege cauza de o valoare dintr-un JSON.
+//
+// 15 s inseamna cel mult ~17% surzenie in cazul cel mai rau (fiecare
+// cerere isi arde tot bugetul) si ~1,5% in practica, unde o cerere
+// reusita dureaza cateva sute de milisecunde.
+#define HEARTBEAT_MIN_INTERVAL_S      15UL
+
+// TAVANUL, perechea podelei de mai sus, si singurul loc unde chiar este
+// obligatoriu: nextHeartbeatInSeconds vine din raspuns pe 32 de biti, iar
+// o valoare mare inmultita cu 1000 se rastoarna in aritmetica pe
+// milisecunde - un server care ar cere pauza de 5.000.000 de secunde nu
+// ar obtine o pauza lunga, ar obtine o bataie imediat, la fiecare trecere
+// prin loop(). heartbeatIntervalSeconds din config nu are nevoie de
+// tavan: este uint16_t, deci nu poate depasi 65535 s si nu se rastoarna.
+//
+// O ora este mult peste orice heartbeatTimeoutSeconds rezonabil - un
+// server care ne tolereaza tacerea mai mult de o ora nu are de ce sa
+// astepte un heartbeat - deci plafonarea nu poate strica o configurare
+// serioasa, doar una gresita.
+#define HEARTBEAT_MAX_INTERVAL_S      3600UL
+
+// Cat se asteapta dupa un heartbeat esuat, in secunde. Ultima valoare se
+// repeta la nesfarsit.
+//
+// Mai des decat backoff-ul de bootstrap fiindca aici nu exista niciun
+// contor pe server care sa fie hranit de reincercari (F-043): un
+// heartbeat esuat nu inchide nicio usa. Si totusi nu la ritmul obisnuit,
+// ca un server cazut sa nu fie interogat degeaba minute in sir.
+#define HEARTBEAT_RETRY_BACKOFF_S     { 10UL, 30UL, 60UL }
+
+// Cat de mare poate fi corpul raspunsului, pentru AMANDOUA cererile
+// modulului - tamponul este unul singur, fiindca cele doua nu se
+// suprapun niciodata (cel mult o cerere per tick).
+//
+// Dimensionat dupa cel mare dintre ele: raspunsul heartbeat-ului are
+// cinci campuri (~150 de octeti), dar cel de la /api/device/config are
+// douasprezece, cu nume lungi - ~330 de octeti minificat si ~400 daca
+// serverul il scrie indentat. 768 lasa deci aproape jumatate marja
+// pentru campuri viitoare si acopera si un problem+json de eroare, si tot
+// ramane la jumatate fata de CLOUD_BODY_MAX, care trebuie sa incapa
+// raspunsul de provisioning.
+//
+// Un raspuns trunchiat NU se parseaza: la config asta inseamna ca se
+// pastreaza configul vechi si se reincearca, in loc sa fie salvata o
+// configurare citita pe jumatate.
+#define HEARTBEAT_BODY_MAX            768
+
+// Cat de mare poate fi corpul CERERII. Cele douazeci de campuri ocupa
+// ~420 de octeti cu valorile de azi; 512 lasa marja, iar depasirea nu
+// trece in tacere - se raporteaza si bataia se sare.
+#define HEARTBEAT_REQUEST_MAX         512
+
+// Numele transportului asa cum il asteapta campul connectionType.
+//
+// NU se ia din NetLink::transportName(): acela intoarce
+// "Ethernet ENC28J60", bun pentru un om care citeste Serial-ul, dar
+// campul din API are valori inchise. Comutatorul urmeaza
+// HUB_NET_TRANSPORT, deci trecerea la WiFi nu lasa aici o minciuna.
+#if HUB_NET_TRANSPORT == HUB_NET_ETHERNET
+  #define HEARTBEAT_CONNECTION_TYPE   "Ethernet"
+#else
+  #define HEARTBEAT_CONNECTION_TYPE   "WiFi"
+#endif
 
 #endif // CONFIG_H

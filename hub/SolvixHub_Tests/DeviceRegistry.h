@@ -192,7 +192,6 @@ namespace DeviceRegistry {
 
   // Afiseaza registrul pe Serial, in forma ceruta de comanda `list`:
   // o linie pe senzor, cu identitatea si starea dezinrolarii.
-  void printAll();
 
   // Tabelul comenzii `sensors`: toate cele HUB_MAX_SENSORS locuri, si
   // cele ocupate, si cele libere, cu ultima masuratoare si cu starea
@@ -202,7 +201,6 @@ namespace DeviceRegistry {
 
   // Afiseaza lista de provisioning din Config.h - cine ARE VOIE sa se
   // inroleze, indiferent daca s-a inrolat deja sau nu.
-  void printProvisioned();
 }
 
 #endif // DEVICE_REGISTRY_H

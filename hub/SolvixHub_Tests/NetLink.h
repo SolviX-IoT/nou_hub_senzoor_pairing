@@ -81,8 +81,6 @@ namespace NetLink {
   void        printStatus();
   const char* transportName();
 
-  bool resolve(const char* host, IPAddress& out);
-
   /*
    * Rezerva magistrala pentru transportul curent si intoarce clientul de
    * folosit. Intoarce NULL daca legatura nu este sus.
@@ -98,12 +96,6 @@ namespace NetLink {
   // Inchide conexiunea si elibereaza magistrala.
   void releaseClient(Client* client);
 
-  // Contoare pentru comanda `net`. Diferenta dintre deschise si inchise
-  // trebuie sa fie 0 sau 1; orice altceva inseamna o conexiune scursa,
-  // iar a patra scursa lasa hub-ul fara retea pana la repornire.
-  unsigned long connectionsOpened();
-  unsigned long connectionsClosed();
-  unsigned long dhcpRenewals();
 }
 
 #endif // NET_LINK_H

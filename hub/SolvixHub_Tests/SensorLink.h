@@ -79,15 +79,6 @@ namespace SensorLink {
   bool begin();
   void tick();
 
-  // Salveaza registrul si adoarme radioul. Nu se mai apeleaza la
-  // schimbarea unui test - testele nu mai exista - ci inainte de o
-  // repornire ceruta de operator (comanda `reboot`), ca frame counter-ele
-  // tinute in RAM sa ajunga in NVS.
-  void stop();
-
-  // true daca radioul a fost initializat cu succes si runtime-ul merge.
-  bool isRunning();
-
   // Deschide fereastra de inrolare pentru PAIRING_MODE_TIMEOUT_MS.
   // Un al doilea apel reporneste numaratoarea.
   void enterPairingMode();
@@ -97,8 +88,6 @@ namespace SensorLink {
 
   bool isPairingMode();
 
-  // Contoarele runtime-ului, pentru comanda `stats`.
-  void printStats();
 
   // ------------------------------------------------------------------
   // Ferestre de liniste pentru restul sistemului
@@ -122,18 +111,6 @@ namespace SensorLink {
   // sa se interpuna (F-031).
   bool hasPendingRemoval();
 
-  // ------------------------------------------------------------------
-  // Carligul pentru telemetrie (etapa urmatoare)
-  // ------------------------------------------------------------------
-  // Chemat pentru fiecare masuratoare VALIDA, din interiorul tick(),
-  // inainte de blocul de afisare. Handler-ul ruleaza pe calea fierbinte a
-  // receptiei: are voie sa puna intr-o coada si sa se intoarca, NIMIC
-  // altceva. O cerere de retea pornita de aici ar cadea fix peste
-  // fereastra de downlink a senzorului care tocmai a vorbit.
-  typedef void (*ReadingHandler)(uint8_t devAddr, int16_t tempX100,
-                                 uint32_t frameCounter, int16_t rssi,
-                                 uint8_t reason);
-  void onReading(ReadingHandler handler);
 }
 
 #endif // SENSOR_LINK_H

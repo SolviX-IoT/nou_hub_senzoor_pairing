@@ -17,9 +17,6 @@ namespace NetLink {
 
   bool isUp() { return s_up; }
 
-  unsigned long connectionsOpened() { return s_opened; }
-  unsigned long connectionsClosed() { return s_closed; }
-  unsigned long dhcpRenewals()      { return s_renewals; }
 
 #if HUB_NET_TRANSPORT == HUB_NET_ETHERNET
 
@@ -108,14 +105,6 @@ namespace NetLink {
 
     Serial.print(F("Reinnoiri DHCP: "));
     Serial.println(s_renewals);
-  }
-
-  bool resolve(const char* host, IPAddress& out) {
-    if (!s_up) return false;
-    SpiBus::claimEthernet();
-    bool ok = (Ethernet.hostByName(host, out) == 1);
-    SpiBus::deselectAll();
-    return ok;
   }
 
   void maintain() {

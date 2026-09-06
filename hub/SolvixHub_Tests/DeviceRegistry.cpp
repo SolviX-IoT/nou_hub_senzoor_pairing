@@ -249,65 +249,6 @@ namespace DeviceRegistry {
     Serial.print('s');
   }
 
-  void printAll() {
-    Serial.println();
-    Serial.print(F("Senzori inrolati: "));
-    Serial.print(s_count);
-    Serial.print(F(" din "));
-    Serial.println(HUB_MAX_SENSORS);
-
-    if (s_count == 0) {
-      Serial.println(F("  (registrul este gol - foloseste 'pair' ca sa inrolezi unul)"));
-      return;
-    }
-
-    for (uint8_t i = 0; i < s_count; i++) {
-      const DeviceRecord& d = s_devices[i];
-
-      Serial.print(F("  Senzor "));
-      printNumber(d.devAddr);
-
-      Serial.print(F("  DevEUI "));
-      SensorPacketCodec::printEui(d.devEui);
-
-      Serial.print(F("  DevAddr 0x"));
-      if (d.devAddr < 0x10) Serial.print('0');
-      Serial.print(d.devAddr, HEX);
-
-      Serial.print(F("  pachete "));
-      Serial.print(d.packets);
-
-      Serial.print(F("  pierdute "));
-      Serial.print(d.lostPackets);
-
-      Serial.print(F("  ultimul counter "));
-      if (d.hasUplink) Serial.print(d.lastFrameCounterUp);
-      else             Serial.print(F("-"));
-
-      if (d.lastSeenMs != 0) {
-        Serial.print(F("  vazut acum "));
-        Serial.print((millis() - d.lastSeenMs) / 1000UL);
-        Serial.print(F(" s"));
-      } else {
-        Serial.print(F("  nevazut de la pornire"));
-      }
-
-      if (d.pendingReset) {
-        Serial.print(F("  [DEZINROLARE IN CURS, RESET-uri trimise: "));
-        Serial.print(d.resetAttempts);
-        if (d.resetSentMs == 0) {
-          Serial.print(F(", niciunul in sesiunea asta - astept un pachet"));
-        } else {
-          Serial.print(F(", ultimul acum "));
-          Serial.print((millis() - d.resetSentMs) / 1000UL);
-          Serial.print(F(" s"));
-        }
-        Serial.print(F("]"));
-      }
-
-      Serial.println();
-    }
-  }
 
   /*
    * Tabelul comenzii `sensors`.
@@ -398,22 +339,4 @@ namespace DeviceRegistry {
     Serial.println(F("=================================================================="));
   }
 
-  void printProvisioned() {
-    Serial.println();
-    Serial.print(F("Senzori care AU VOIE sa se inroleze (Config.h): "));
-    Serial.println(PROVISIONED_COUNT);
-    Serial.println(F("Numarul senzorului este chiar pozitia din acest tabel."));
-
-    for (uint8_t i = 0; i < PROVISIONED_COUNT; i++) {
-      Serial.print(F("  Senzor "));
-      printNumber((uint8_t)(i + 1));
-      Serial.print(F("  DevEUI "));
-      SensorPacketCodec::printEui(PROVISIONED_DEVICES[i].devEui);
-      Serial.print(F("  (SENSOR_NODE_ID = "));
-      Serial.print(i + 1);
-      Serial.print(F(" pe placa)"));
-      Serial.println(findByEui(PROVISIONED_DEVICES[i].devEui) != nullptr
-                     ? F("  - inrolat") : F("  - neinrolat"));
-    }
-  }
 }

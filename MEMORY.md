@@ -74,11 +74,12 @@ valori** ale lui `SENSOR_NODE_ID`.
 
 **Hub:** sketch-ul compileaza pentru ESP32 Dev Module fara erori si fara
 warning-uri proprii (cele ramase sunt din `EthernetENC` si `LoRa`) si ocupa
-**356 kB din 1310 kB** de flash, cu **25,6 kB** de RAM global.
+**349,8 kB din 1310 kB** de flash, cu **25,6 kB** de RAM global.
 
 Cifra era 351 kB inainte de 2026-09-01. Stergerea celor sapte teste (F-039) a
-dat inapoi ~26 kB, iar `ArduinoJson` plus modulele noi de retea au adaugat
-~31 kB: net, aproape neutru.
+dat inapoi ~26 kB, `ArduinoJson` plus modulele noi de retea au adaugat ~31 kB,
+iar curatenia din F-046 - consola redusa la trei comenzi si tot codul ramas
+fara apelanti - a mai scos ~9 kB. Sketch-ul are acum **~5000 de linii**.
 
 > **Atentie la WiFi, cand va veni.** Stiva ESP32 de WiFi adauga 350–500 kB si
 > ar duce sketch-ul pe la 800–900 kB. Incape in 1310 kB, dar **inchide usa
@@ -92,7 +93,8 @@ dat inapoi ~26 kB, iar `ArduinoJson` plus modulele noi de retea au adaugat
 ## Hub-ul in cloud — ce este adevarat acum
 
 Hub-ul porneste singur, asculta senzorii, isi ia adresa prin DHCP si se
-provizioneaza la `http://84.117.97.136:7039`. Doi pasi, in ordine:
+provizioneaza la `http://84.117.97.136:7039`. Doi pasi de pornire, in ordine,
+si apoi bate:
 
 1. `GET /api/health` cu antetul `X-Solvix-AdminKey`. **Sanatatea se judeca
    dupa campul `database` = `Reachable`**, nu dupa `status`: API-ul poate
@@ -113,11 +115,52 @@ provizioneaza la `http://84.117.97.136:7039`. Doi pasi, in ordine:
   totusi, `CLOUD_PROVISION_SENDS_ADMIN_KEY` = 1; trecerea pe 0 este sigura si
   ar scoate cheia globala din fiecare hub din teren.
 
-**Cele 11 valori de `config` se salveaza, dar NU se folosesc inca.** Heartbeat
-si telemetrie sunt etapa urmatoare; carligul este `SensorLink::onReading()`,
-inca neinregistrat. La fel `maxSensors` de la server: se salveaza, se compara
-cu `HUB_MAX_SENSORS` si se anunta nepotrivirea, dar valoarea locala ramane cea
-care dimensioneaza registrul.
+### Pasul 3: heartbeat-ul
+
+Dupa provisioning hub-ul bate singur: `POST /api/device/heartbeat` la fiecare
+`heartbeatIntervalSeconds`, autentificat cu **`X-Solvix-ApiKey`** si cheia per
+hub din NVS. Corpul nu poarta niciun identificator, deci antetul acela este
+singurul lucru care spune serverului cine bate.
+
+- **8 din cele 20 de campuri se masoara**: `uptimeSeconds`,
+  `internetAvailable`, `cloudReachable`, `connectionType`, cele trei numere de
+  senzori, `freeMemoryBytes`. Restul (baterie, alimentare, `cpuTemperature`,
+  `freeStorageBytes`, `publicIp`, `wifiSignalStrength`) sunt hardware
+  inexistent si se trimit zero / sir gol, cu presupunerea scrisa langa fiecare.
+- **Ritmul serverului nu este crezut pe cuvant:** si
+  `heartbeatIntervalSeconds`, si `nextHeartbeatInSeconds` trec prin
+  `HEARTBEAT_MIN_INTERVAL_S` = 15 s si `HEARTBEAT_MAX_INTERVAL_S` = 3600 s. Cat
+  dureaza o cerere hub-ul este surd, iar tavanul opreste rasturnarea inmultirii
+  cu 1000.
+- **`heartbeatTimeoutSeconds`** este toleranta serverului: se verifica la
+  pornire ca ritmul incape in ea, si in rulare se anunta o data caderea si o
+  data revenirea. Fara linia asta, „hub-ul apare mort in aplicatie" ar fi
+  singura defectiune din tot lantul complet invizibila de pe placa.
+- La `configUpdateRequired` se cere **`GET /api/device/config`** (fara corp,
+  aceeasi cheie), se salveaza prin `HubIdentity::storeConfig()` si ritmul se
+  schimba pe loc. `pendingCommandCount` doar se raporteaza: pentru comenzi nu
+  exista inca endpoint.
+- **Cel mult o cerere per `tick()`** si **cel mult o preluare per
+  `configVersion` anuntata** — a doua este garda impotriva unui server care
+  nu stinge steagul si ne-ar tine intr-un ciclu fara capat.
+- **`maxOfflineMessages` sta ULTIMUL in `HubConfig`.** Vine doar din
+  `/api/device/config`, deci a aparut dupa ce existau hub-uri cu identitatea
+  salvata. Fiindca e la coada, blobul vechi de **20** de octeti se citeste
+  corect peste structura de **22** (`getBytes` accepta un blob mai scurt,
+  `loadFromNvs` face `memset` inainte), campul nou ramane 0, si
+  **`IDENTITY_BLOB_VERSION` a ramas 1 — nimic nu se re-provizioneaza**.
+  Verificat cu `static_assert` pe compilatorul xtensa: toate offset-urile
+  vechi neschimbate. Un camp inserat la mijloc ar sparge exact asta.
+
+**Din valorile de `config` se folosesc doua** — cele doua de heartbeat.
+Restul de zece se salveaza si asteapta telemetria in loturi. La fel
+`maxSensors` de la server: se salveaza, se compara cu `HUB_MAX_SENSORS` si se
+anunta nepotrivirea, dar valoarea locala ramane cea care dimensioneaza
+registrul.
+
+**Consola are trei comenzi:** `pair`, `status`, `remove`. `status` arata tot -
+senzorii, reteaua, cloud-ul, **pulsul** si identitatea hub-ului, cu
+`pairingCode` intreg si fara `apiKey` (F-046).
 
 **Stare la 2026-09-01, prima rulare cu serverul real:** reteaua, DHCP-ul,
 HTTP-ul si parsarea merg cap-coada — `GET /api/health` intoarce 200 in ~300 ms
@@ -205,5 +248,21 @@ inrolarea veche; placa porneste in repaus si asteapta o inrolare noua.
 
 ## Ramas de facut
 
+- **Heartbeat-ul si actualizarea de config nu au fost incercate inca pe
+  serverul real.** Compileaza si sunt cablate in `loop()`, dar nu pot porni
+  pana cand provisioning-ul nu trece: pana atunci nu exista `apiKey`, iar
+  `apiKey` este singura autentificare a ambelor endpoint-uri. Prima rulare de
+  dupa expirarea ferestrei de rate limiting le valideaza pe toate deodata. De
+  verificat atunci, in ordine:
+  1. antetul `X-Solvix-ApiKey` este acceptat si la `/api/device/heartbeat`, si
+     la `/api/device/config`;
+  2. schema corpului de heartbeat este cea asteptata de server;
+  3. ce valori vin efectiv in `heartbeatIntervalSeconds` /
+     `heartbeatTimeoutSeconds` — daca a doua nu o depaseste confortabil pe
+     prima, hub-ul striga la pornire si configul trebuie reparat pe server;
+  4. **stinge serverul `configUpdateRequired` dupa un GET pe
+     `/api/device/config`?** Asa este presupus. Daca nu il stinge, garda pe
+     `configVersion` opreste ciclul si scrie pe Serial exact asta — deci se
+     vede din jurnal, fara sa fie nevoie de vreo masuratoare separata.
 - `PINOUT_config.pdf` inca arata **RC1 -> TPL5110**. Componenta a fost scoasa
   din proiectare la 2026-08-26; RC1 este acum un pin liber, fara cod.

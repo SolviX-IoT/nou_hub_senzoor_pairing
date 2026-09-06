@@ -15,8 +15,10 @@
              parametrii de fabrica din Config.h. Raspunsul se salveaza in
              NVS si de atunci hub-ul porneste provizionat.
 
-  DUPA ACEEA NU MAI FACE NIMIC. Heartbeat-ul si telemetria sunt etapa
-  urmatoare; carligele lor sunt declarate mai jos, dar nu au corp.
+  DUPA ACEEA NU MAI FACE NIMIC: in Ready, tick() se intoarce imediat.
+  De acolo preia HubHeartbeat, care isi ia ritmul din configul salvat de
+  pasul 4 si bate cat timp hub-ul este alimentat. Telemetria in loturi
+  ramane etapa urmatoare, si nu are inca niciun carlig aici.
 
   DE CE CERERILE SUNT BLOCANTE, SI DE CE ESTE ACCEPTABIL
   ---------------------------------------------------------------------
@@ -59,7 +61,24 @@ namespace HubCloud {
     HealthBackoff,  // serverul nu a raspuns bine; se asteapta
     Provision,      // urmeaza un POST /api/device/provision
     Ready,          // gata: server sanatos si hub provizionat
-    Blocked         // esec care nu se repara singur de la sine
+
+    /*
+     * Prea multe esecuri de provisioning la rand: se asteapta LUNG.
+     *
+     * NU este o fundatura, desi asa a fost la inceput. Cat timp exista
+     * comanda `provision`, `Blocked` insemna "stop definitiv, reia omul";
+     * de cand consola s-a redus la trei comenzi si aceea nu mai exista,
+     * un hub blocat ar fi ramas blocat pana la reprogramare - exact in
+     * cazul in care se ajunge aici cel mai des, adica atunci cand
+     * serverul ne-a limitat (429).
+     *
+     * Acum este doar treapta cea mai lunga de asteptare:
+     * CLOUD_BLOCKED_RETRY_MS, apoi se reintra singur in Health cu
+     * contoarele pe zero. Castigul din F-043 ramane intreg - nu se mai
+     * hamareste serverul la 11 secunde - dar hub-ul isi revine fara nicio
+     * interventie.
+     */
+    Blocked
   };
 
   void begin();
@@ -67,16 +86,10 @@ namespace HubCloud {
 
   State       state();
   const char* stateName();
-  void        printStatus();
 
-  // Forteaza o verificare de sanatate acum (comanda `health`).
-  void forceHealth();
-
-  // Forteaza o incercare de provisioning (comanda `provision`).
-  // Refuza daca hub-ul este deja provizionat: un al doilea provisioning
-  // pentru acelasi deviceUid poate insemna, pe un server neidempotent, un
-  // hub nou si istoricul vechi orfan. Calea corecta este `forget yes`.
-  void forceProvision();
+  // Ultima eroare, pentru comanda `status`. Sir gol daca nu a fost
+  // niciuna sau daca ultima incercare a reusit.
+  const char* lastError();
 }
 
 #endif // HUB_CLOUD_H

@@ -24,6 +24,5 @@
 
 void printSeparator();
 void printTitle(const char* title);
-void printHexByte(const char* label, uint8_t value);
 
 #endif // CONSOLE_H

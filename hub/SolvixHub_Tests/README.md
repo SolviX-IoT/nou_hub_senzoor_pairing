@@ -244,7 +244,7 @@ treziri, si pornirea simultana dupa o pana de curent.
 Un `DATA_UP` de 13 octeti sta pe aer ~41 ms la SF7/BW125/CR4-5, iar un
 senzor emite o data la ~30 s: ocuparea canalului este de 0,15% per placa.
 Cate o coliziune izolata tot se intampla, si de aceea hub-ul o **numara**
-— vezi coloana `pierd.` din `sensors`.
+— vezi coloana `pierd.` din `status`.
 
 ### Cand un senzor amuteste
 

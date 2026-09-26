@@ -17,10 +17,11 @@ numar fix de la 1 la 5.
 
 Documentatia este impartita in trei:
 
-- **[CLAUDE.md](CLAUDE.md)** — referinta activa: pini, protocol, memorie
-  ne-volatila, regulile de lucru si conventia de mesaje de commit.
-- **[MEMORY.md](MEMORY.md)** — starea de acum: cifrele de incadrare, versiunile
-  de format, ce se schimba la fiecare placa.
+- **[CLAUDE.md](CLAUDE.md)** — doar regulile: de cod, de colaborare,
+  conventia de mesaje de commit.
+- **[MEMORY.md](MEMORY.md)** — jurnalul pe commit-uri, starea de acum (cifre,
+  versiuni de format, ce se schimba la fiecare placa) si referinta: pini,
+  radio, protocol, memorie ne-volatila, rolul fiecarui fisier.
 - **[ISTORIC.md](ISTORIC.md)** — arhiva `F-001…F-038`: simptom, cauza, fix.
 
 Instructiunile de utilizare ale hub-ului sunt in
@@ -70,7 +71,7 @@ dupa o dezinrolare, deci poate fi scris pe cutie.
   propriu numarului lui (23,2 / 25,3 / 27,4 / 29,6 / 31,7 s nominal) plus
   un jitter aleator la fiecare ciclu. Doi senzori care s-au ciocnit o
   data se despart de la sine dupa o perioada, in loc sa ramana ciocniti.
-- **Ce se vede pe hub:** comanda `sensors` da tabelul celor cinci locuri
+- **Ce se vede pe hub:** comanda `status` da tabelul celor cinci locuri
   — ultima temperatura, de cat timp nu s-a mai auzit fiecare, RSSI,
   pachete primite si pachete pierdute. Un senzor care amuteste este
   anuntat o data, si tot o data la revenire.

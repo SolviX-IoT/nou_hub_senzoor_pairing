@@ -23,6 +23,25 @@ Cel mai nou sus. O intrare per commit: titlul, **ce** s-a schimbat (fisiere,
 functii, constante), **de ce**, **cum s-a verificat**, iar pentru `senzor/`
 cifra `Flash: A -> B words (±N). RAM: A -> B B.`
 
+### 2026-09-26 — `refactor(hub): comaseaza cele 28 de fisiere in 16, pe domenii`
+- **Ce:** modulele hub-ului mutate intregi, fara nicio schimbare de logica, in
+  `HubBoard` (SpiBus + Leds + Console), `HubSensors` (LoRaRadio +
+  DeviceRegistry + SensorLink), `HubNet` (NetLink + Http), `HubCloud`
+  (HubIdentity + HubCloud). `HubHeartbeat`, `SensorPacket`, `SerialConsole`
+  raman in fisierele lor, cu `#include`-urile renumite. Fiecare fisier nou
+  incepe cu cuprinsul modulelor lui. Comentariile care citau fisiere disparute
+  sau numere vechi de reguli din CLAUDE.md sunt actualizate, inclusiv doua
+  comentarii din `senzor/main.c` (fara efect asupra firmware-ului). README-ul
+  hub-ului are o sectiune noua, „Unde e fiecare lucru".
+- **De ce:** codul era greu de parcurs in 28 de tab-uri, unele de 13 linii.
+- **Verificat:** compilat cu `arduino-cli` inainte si dupa: flash
+  371.963 -> 371.711 B (-252, mai putine unitati de compilare), RAM
+  25.332 -> 25.332 B. Aceleasi 172 de simboluri ale proiectului si aceleasi
+  80 de obiecte de date, cu aceleasi dimensiuni (`nm`). Nu a fost programat pe
+  placa.
+- **Senzor:** doar doua comentarii in `main.c`; codul nu s-a schimbat, deci
+  nici cifra (2395 / 95), necompilat.
+
 ### 2026-09-26 — `docs(docs): CLAUDE.md redus la reguli, restul mutat in MEMORY.md`
 - **Ce:** CLAUDE.md pastreaza doar regulile de cod, regulile de colaborare,
   conventia de commit si regula de actualizare. Referinta (hardware, radio,
@@ -368,28 +387,38 @@ tabelul senzorilor, o linie de retea, una de cloud, una de **puls** (ultimul
 heartbeat reusit) si identitatea hub-ului, cu `pairingCode` intreg si **fara
 `apiKey`**.
 
-Sketch-ul are **13 module**, fiecare cu perechea `.h` (ce ofera) / `.cpp` (cum
-face), plus `Config.h` si `.ino` — 28 de fisiere. `SensorPacket` ramane modul
-separat fiindca este oglinda sectiunii 4 din `senzor/main.c`; `SpiBus` fiindca
-este o constrangere fizica a placii.
+Sketch-ul are **13 module in 16 fisiere**, grupate pe domenii (2026-09-26).
+Fiecare modul este un `namespace` cu numele lui, deci se cauta dupa
+`SensorLink::`, nu dupa fisier. `SensorPacket` ramane in fisierul lui fiindca
+este oglinda sectiunii 4 din `senzor/main.c`. Numele fisierelor noi poarta
+prefixul `Hub` ca sa nu ascunda antete de biblioteca (`Network.h` exista in
+nucleul ESP32 3.x — aceeasi capcana ca F-021).
 
-| Fisier | Rol |
+| Fisier | Module |
+|--------|--------|
+| `HubBoard.*` | `SpiBus`, `Leds`, `Console` |
+| `HubSensors.*` | `LoRaRadio`, `DeviceRegistry`, `SensorLink` |
+| `HubNet.*` | `NetLink`, `Http` |
+| `HubCloud` (`HubCloud.*`) | `HubIdentity`, `HubCloud` |
+| `HubHeartbeat.*`, `SensorPacket.*`, `SerialConsole.*` | cate un modul, cu numele fisierului |
+
+| Modul (fisier) | Rol |
 |--------|-----|
 | `SolvixHub_Tests.ino` | Doar `setup()`, `loop()` si butonul 1. `setup()` merge in ordinea Leds -> SpiBus -> registru -> identitate -> **SensorLink (radioul asculta)** -> NetLink -> HubCloud -> HubHeartbeat -> consola: radioul porneste inaintea retelei, iar **esecul retelei nu opreste boot-ul**. `loop()` nu contine nimic blocant |
 | `Config.h` | **Singura sursa de adevar pentru pini** si constante: SPI, ETH, LoRa, butoane, LED-uri, pairing (`PAIRING_MODE_TIMEOUT_MS`, `PAIRING_SEND_ACK`, `REMOVE_CONFIRM_SILENCE_MS`, `REGISTRY_*`), multi-senzor (`HUB_MAX_SENSORS`, `SENSOR_OFFLINE_MS`, `SENSOR_FCNT_GAP_RESTART`, `PROVISIONED_DEVICES_INIT` — **ordinea randurilor da numarul fiecarui senzor**), RETEAUA si CLOUD (`HUB_NET_TRANSPORT`, `ETH_DHCP_*`, parametrii de fabrica ai hub-ului, `CLOUD_*`, `HTTP_*`, `IDENTITY_NVS_NAMESPACE`), HEARTBEAT (`CLOUD_PATH_HEARTBEAT`, `CLOUD_API_KEY_HEADER`, `HEARTBEAT_MIN_INTERVAL_S` / `HEARTBEAT_MAX_INTERVAL_S` — marginile in care se accepta ritmul cerut de server) |
-| `SpiBus.*` | Arbitrajul magistralei partajate: `begin()` o singura data, `claimEthernet()`/`claimLoRa()`, resetul celor doua module. Sunt **preconditii, nu lacate** — bibliotecile isi coboara singure CS-ul |
-| `Console.*` | `printSeparator()` si `printTitle()` |
-| `LoRaRadio.*` | Invelis peste libraria LoRa: `begin()`, `sendRaw()`, `receiveRaw()`, `sleep()`. Numai variante binare, fara `String` (F-019). Receptia e prin polling |
-| `Leds.*` | Cele doua LED-uri. `set()`, `pulse()`, `service()` fara `delay()` |
-| `SensorPacket.*` | **Oglinda protocolului din `senzor/main.c`**: constantele tuturor tipurilor, `decode()`/`print()`/`printRaw()`, `messageType()`, `parseJoinRequest()`, `parseData()`, `buildJoinAccept()`, `buildCommand()`, `printEui()` |
-| `DeviceRegistry.*` | Registrul pe NVS (`solvix-pair`); `isProvisioned()`, **`addressForEui()`** (numarul din pozitia in tabel, F-037), `printSensorTable()` — toate locurile, si cele goale |
-| `SensorLink.*` | **Runtime-ul permanent** (fostul „test 8"): fereastra de pairing, `JOIN_REQ` -> `JOIN_ACCEPT`, `DATA_UP` -> `decode()`, `CMD_DOWN` (ACK/RESET), dezinrolarea confirmata prin tacere (F-031), golurile de frame counter, `serviceOfflineWatch()`. `lastRxMs()` si `hasPendingRemoval()` sunt **cele doua porti** prin care trece orice altceva lung din `loop()`; ACK-ul pleaca **inaintea** blocului de log (F-040) |
-| `NetLink.*` | Reteaua, agnostica de transport. `acquireClient()` / `releaseClient()` intorc un `Client*` si sunt **si granita magistralei SPI**, deci `Http` nu afla niciodata pe ce transport merge. Ethernet azi, WiFi printr-un `#elif` mai tarziu, fara schimbari la apelanti. Aici e definit `HUB_MAC` |
-| `Http.*` | GET si POST peste un `Client&`, fara niciun `String`: linie de status, antete plafonate, corp marginit, **de-chunker** (F-042), `Retry-After`. Numele nu este `HttpClient.h`, ca sa nu ascunda antetul bibliotecii cu acel nume (aceeasi capcana ca F-021) |
-| `HubIdentity.*` | Identitatea primita de la cloud, in NVS (`solvix-hub`, separat de registru): `hubGuid`, `apiKey`, `pairingCode`, `lifecycleStatus`, `provisionedAt`, `maxSensors` si valorile de `config` (11 de la provisioning, 12 de la `/api/device/config`) — se folosesc **doua**, `heartbeatIntervalSeconds` si `heartbeatTimeoutSeconds`. `storeConfig()` inlocuieste **numai** blocul de configurare, fara sa atinga versiunea. **`maxOfflineMessages` sta ULTIMUL in `HubConfig`** (vezi §7). Versiunea se scrie **ultima** si se sterge **prima**, ca o identitate pe jumatate scrisa sa arate ca una lipsa. Dimensiunile campurilor isi poarta marja in comentariu (F-044) |
+| `SpiBus` (`HubBoard.*`) | Arbitrajul magistralei partajate: `begin()` o singura data, `claimEthernet()`/`claimLoRa()`, resetul celor doua module. Sunt **preconditii, nu lacate** — bibliotecile isi coboara singure CS-ul |
+| `Console` (`HubBoard.*`) | `printSeparator()` si `printTitle()` |
+| `LoRaRadio` (`HubSensors.*`) | Invelis peste libraria LoRa: `begin()`, `sendRaw()`, `receiveRaw()`, `sleep()`. Numai variante binare, fara `String` (F-019). Receptia e prin polling |
+| `Leds` (`HubBoard.*`) | Cele doua LED-uri. `set()`, `pulse()`, `service()` fara `delay()` |
+| `SensorPacket` (`SensorPacket.*`) | **Oglinda protocolului din `senzor/main.c`**: constantele tuturor tipurilor, `decode()`/`print()`/`printRaw()`, `messageType()`, `parseJoinRequest()`, `parseData()`, `buildJoinAccept()`, `buildCommand()`, `printEui()` |
+| `DeviceRegistry` (`HubSensors.*`) | Registrul pe NVS (`solvix-pair`); `isProvisioned()`, **`addressForEui()`** (numarul din pozitia in tabel, F-037), `printSensorTable()` — toate locurile, si cele goale |
+| `SensorLink` (`HubSensors.*`) | **Runtime-ul permanent** (fostul „test 8"): fereastra de pairing, `JOIN_REQ` -> `JOIN_ACCEPT`, `DATA_UP` -> `decode()`, `CMD_DOWN` (ACK/RESET), dezinrolarea confirmata prin tacere (F-031), golurile de frame counter, `serviceOfflineWatch()`. `lastRxMs()` si `hasPendingRemoval()` sunt **cele doua porti** prin care trece orice altceva lung din `loop()`; ACK-ul pleaca **inaintea** blocului de log (F-040) |
+| `NetLink` (`HubNet.*`) | Reteaua, agnostica de transport. `acquireClient()` / `releaseClient()` intorc un `Client*` si sunt **si granita magistralei SPI**, deci `Http` nu afla niciodata pe ce transport merge. Ethernet azi, WiFi printr-un `#elif` mai tarziu, fara schimbari la apelanti. Aici e definit `HUB_MAC` |
+| `Http` (`HubNet.*`) | GET si POST peste un `Client&`, fara niciun `String`: linie de status, antete plafonate, corp marginit, **de-chunker** (F-042), `Retry-After`. Numele nu este `HttpClient.h`, ca sa nu ascunda antetul bibliotecii cu acel nume (aceeasi capcana ca F-021) |
+| `HubIdentity` (`HubCloud.*`) | Identitatea primita de la cloud, in NVS (`solvix-hub`, separat de registru): `hubGuid`, `apiKey`, `pairingCode`, `lifecycleStatus`, `provisionedAt`, `maxSensors` si valorile de `config` (11 de la provisioning, 12 de la `/api/device/config`) — se folosesc **doua**, `heartbeatIntervalSeconds` si `heartbeatTimeoutSeconds`. `storeConfig()` inlocuieste **numai** blocul de configurare, fara sa atinga versiunea. **`maxOfflineMessages` sta ULTIMUL in `HubConfig`** (vezi §7). Versiunea se scrie **ultima** si se sterge **prima**, ca o identitate pe jumatate scrisa sa arate ca una lipsa. Dimensiunile campurilor isi poarta marja in comentariu (F-044) |
 | `HubCloud.*` | Masina de stari a bootstrap-ului: `NetWait` -> `Health` -> `Provision` -> `Ready`, cu backoff 5/10/30/60 s si contoare separate pe cele doua cai (F-043). Sanatatea se judeca dupa `"database": "Reachable"`, nu dupa `"status"`. Un 429 primeste pauza lui lunga; `Blocked` este o asteptare de 30 de minute, nu o fundatura (F-046). Cererile sunt blocante dar trec prin cele doua porti din `SensorLink` |
-| `HubHeartbeat.*` | `POST /api/device/heartbeat` la fiecare `heartbeatIntervalSeconds`, autentificat cu `X-Solvix-ApiKey`. Porneste abia din `HubCloud::Ready`. Detaliile de comportament: §7 |
-| `SerialConsole.*` | Cele trei comenzi. Citeste **cel mult 32 de octeti per apel** si incheie linia si dupa liniste, nu doar la Enter — altfel pe „No line ending" nu s-ar executa nimic (F-045) |
+| `HubHeartbeat` (`HubHeartbeat.*`) | `POST /api/device/heartbeat` la fiecare `heartbeatIntervalSeconds`, autentificat cu `X-Solvix-ApiKey`. Porneste abia din `HubCloud::Ready`. Detaliile de comportament: §7 |
+| `SerialConsole` (`SerialConsole.*`) | Cele trei comenzi. Citeste **cel mult 32 de octeti per apel** si incheie linia si dupa liniste, nu doar la Enter — altfel pe „No line ending" nu s-ar executa nimic (F-045) |
 | `README.md` | Instructiuni de utilizare, comenzile, secventa de pornire, tabelul SPI, note hardware |
 
 ---
@@ -429,6 +458,12 @@ Cifra era 351 kB inainte de 2026-09-01. Stergerea celor sapte teste (F-039) a
 dat inapoi ~26 kB, `ArduinoJson` plus modulele noi de retea au adaugat ~31 kB,
 iar curatenia din F-046 a mai scos ~9 kB. Sketch-ul are acum **~5000 de linii**.
 
+**Masurat la 2026-09-26 cu `arduino-cli`**, nucleul `esp32:esp32` 3.3.3 si
+ArduinoJson 7.4.3: **371.711 B** flash, **25.332 B** RAM global, dupa
+comasarea in 16 fisiere (inainte: 371.963 B / 25.332 B). Diferenta fata de
+cifra de mai sus vine din alta versiune de nucleu; comparatiile se fac doar pe
+aceeasi instalare.
+
 > **Atentie la WiFi, cand va veni.** Stiva ESP32 de WiFi adauga 350–500 kB si
 > ar duce sketch-ul pe la 800–900 kB. Incape in 1310 kB, dar **inchide usa
 > OTA**: o schema cu doua partitii de aplicatie da fiecareia ~640 kB, si 900
@@ -457,7 +492,7 @@ si apoi bate:
 
 **Masurat cu `curl` la 2026-09-01, si ambele lucruri conteaza (F-042):**
 - serverul raspunde `Transfer-Encoding: chunked`, **fara** `Content-Length`,
-  deci de-chunker-ul din `Http.cpp` este obligatoriu, nu o precautie;
+  deci de-chunker-ul din `Http` (`HubNet.cpp`) este obligatoriu, nu o precautie;
 - `X-Solvix-AdminKey` **nu** este ceruta la `/api/device/provision`: aceeasi
   cerere cu si fara ea primeste acelasi 401 de provisioning. Se trimite
   totusi, `CLOUD_PROVISION_SENDS_ADMIN_KEY` = 1; trecerea pe 0 este sigura si
@@ -627,7 +662,7 @@ inrolarea veche; placa porneste in repaus si asteapta o inrolare noua.
   - `printProblemDetail` este duplicat in `HubCloud.cpp` si `HubHeartbeat.cpp`;
     comentarii ramase pentru functii sterse (`LoRaRadio.h`, `SensorLink.cpp`,
     `DeviceRegistry.h`).
-- **Restructurarea hub-ului in mai putine fisiere** — propusa la 2026-09-26
-  (grupare pe domenii, 28 -> ~14 fisiere), asteapta acordul.
+- **Hub-ul restructurat (2026-09-26) nu a fost inca programat pe placa.** De
+  verificat: boot-ul, `pair` + o inrolare, `status`, un heartbeat.
 - `PINOUT_config.pdf` inca arata **RC1 -> TPL5110**. Componenta a fost scoasa
   din proiectare la 2026-08-26; RC1 este acum un pin liber, fara cod.

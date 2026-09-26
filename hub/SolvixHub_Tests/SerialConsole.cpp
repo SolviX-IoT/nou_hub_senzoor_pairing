@@ -1,10 +1,8 @@
 #include "SerialConsole.h"
-#include "Console.h"
-#include "SensorLink.h"
-#include "DeviceRegistry.h"
+#include "HubBoard.h"
+#include "HubSensors.h"
 #include "SensorPacket.h"
-#include "NetLink.h"
-#include "HubIdentity.h"
+#include "HubNet.h"
 #include "HubCloud.h"
 #include "HubHeartbeat.h"
 

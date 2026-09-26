@@ -1,10 +1,7 @@
 #include "HubHeartbeat.h"
-#include "NetLink.h"
-#include "Http.h"
-#include "HubIdentity.h"
+#include "HubNet.h"
 #include "HubCloud.h"
-#include "SensorLink.h"
-#include "DeviceRegistry.h"
+#include "HubSensors.h"
 #include <ArduinoJson.h>
 #include <esp_timer.h>
 
@@ -30,7 +27,7 @@ namespace HubHeartbeat {
    * cereri. Static fiindca sirul trebuie sa traiasca cat dureaza cererea:
    * Http primeste un tablou de pointeri si nu copiaza nimic.
    *
-   * CONTINUTUL LUI NU AJUNGE NICIODATA PE Serial (regula 11).
+   * CONTINUTUL LUI NU AJUNGE NICIODATA PE Serial (regula 8 din CLAUDE.md).
    */
   static char s_apiKeyHeader[sizeof(CLOUD_API_KEY_HEADER) + 2
                              + sizeof(HubIdentityData::apiKey)];
@@ -319,7 +316,7 @@ namespace HubHeartbeat {
      * apare mort in aplicatie.
      *
      * NU SE CORECTEAZA SINGUR. Este exact cazul lui maxSensors din
-     * HubIdentity.h: cand ce spune serverul nu se potriveste cu ce se
+     * HubCloud.h: cand ce spune serverul nu se potriveste cu ce se
      * poate face aici, se spune ZGOMOTOS si se merge mai departe. O
      * valoare inventata local ar ascunde o neintelegere intre cele doua
      * capete, care trebuie reparata pe server, nu mascata pe placa.
@@ -516,7 +513,7 @@ namespace HubHeartbeat {
      *
      * Campurile de mai jos sunt in schema serverului, dar hub-ul nu are
      * hardware pentru ele. Se trimit cu valori fixe, si fiecare isi poarta
-     * presupunerea aici (regula 6.2.5 din CLAUDE.md). O cifra plauzibila
+     * presupunerea aici (regula 3.4 din CLAUDE.md). O cifra plauzibila
      * si inventata - o tensiune de baterie, o temperatura de cip - este
      * mai rea decat un zero: zero se vede ca zero, o cifra frumoasa ajunge
      * intr-un grafic si e crezuta.

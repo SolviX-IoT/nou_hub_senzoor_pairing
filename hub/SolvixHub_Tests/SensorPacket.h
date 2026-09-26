@@ -3,7 +3,7 @@
   ---------------------------------------------------------------------
   ACEST FISIER ESTE OGLINDA sectiunii 4 de protocol din senzor/main.c.
   Orice modificare aici trebuie facuta si acolo, in acelasi commit
-  (regula 10 din CLAUDE.md).
+  (regula 2 din CLAUDE.md).
 
   !!! RETEAUA NU ESTE AUTENTIFICATA !!!
   ---------------------------------------------------------------------

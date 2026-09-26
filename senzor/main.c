@@ -190,7 +190,7 @@
  * Cine schimba oricare dintre cele trei constante de mai jos trebuie sa
  * schimbe si REMOVE_CONFIRM_SILENCE_MS din hub/SolvixHub_Tests/Config.h:
  * hub-ul confirma dezinrolarea prin tacere, iar un senzor care doarme
- * tace si el (F-031, F-034, regula 11 din CLAUDE.md).
+ * tace si el (F-031, F-034, regula 6 din CLAUDE.md).
  */
 #define SLEEP_WAKEUPS_BASE      11U     /* 11 x ~2,11 s = ~23,2 s      */
 #define SLEEP_SLOT_MASK         0x07U   /* (DevAddr-1) & 7 -> 0..7     */
@@ -397,7 +397,7 @@
  * 4. PROTOCOLUL DE APLICATIE
  * ---------------------------------------------------------------------
  *  OGLINDIT in hub/SolvixHub_Tests/SensorPacket.h - cele doua fisiere se
- *  modifica IMPREUNA, in acelasi commit (regula 10 din CLAUDE.md).
+ *  modifica IMPREUNA, in acelasi commit (regula 2 din CLAUDE.md).
  *
  *  Toate campurile multi-octet sunt big-endian. Primul octet ramane
  *  magic-ul 0xA5 din protocolul initial; ce s-a schimbat este ca octetul

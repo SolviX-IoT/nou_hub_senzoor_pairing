@@ -1,5 +1,458 @@
-#include "SensorLink.h"
+/*
+  HubSensors.cpp - tot ce vorbeste cu senzorii.
+  ---------------------------------------------------------------------
+  Module, in ordinea dependentelor, fiecare in namespace-ul lui:
+    LoRaRadio       invelisul peste libraria LoRa (SX1276)
+    DeviceRegistry  registrul senzorilor inrolati, in NVS (solvix-pair)
+    SensorLink      runtime-ul permanent: pairing, date, ACK, dezinrolare
+*/
 
+#include "HubSensors.h"
+#include <Preferences.h>
+
+// =====================================================================
+//  LoRaRadio
+// =====================================================================
+
+namespace LoRaRadio {
+
+  static bool s_ready = false;
+
+  bool isReady() { return s_ready; }
+
+  bool begin(long frequency) {
+    SpiBus::claimLoRa();
+    SpiBus::resetLoRaModule();
+
+    LoRa.setPins(PIN_LORA_NSS, PIN_LORA_RST, PIN_LORA_DIO0);
+
+    // LoRa.begin() apeleaza intern SPI.begin() fara argumente. Pe ESP32,
+    // apelul este ignorat daca magistrala a fost deja initializata de
+    // SpiBus::begin(), deci maparea noastra de pini ramane valabila.
+    s_ready = LoRa.begin(frequency);
+
+    if (!s_ready) {
+      Serial.println(F("EROARE: modulul LoRa nu a fost gasit."));
+      Serial.println(F("Verifica NSS (GPIO5), RST (GPIO14), DIO0 (GPIO26) si alimentarea."));
+      SpiBus::deselectAll();
+      return false;
+    }
+
+    // Parametrii de modulatie, din Config.h. Sunt aplicati explicit, nu
+    // lasati pe seama valorilor implicite ale librariei: nodul senzor ii
+    // scrie direct in registrele SX1276, iar cele doua capete trebuie sa
+    // coincida exact. Vezi comentariul detaliat din Config.h.
+    LoRa.setSpreadingFactor(LORA_SPREADING_FACTOR);
+    LoRa.setSignalBandwidth(LORA_BANDWIDTH_HZ);
+    LoRa.setCodingRate4(LORA_CODING_RATE_4);
+    LoRa.setPreambleLength(LORA_PREAMBLE_LENGTH);
+    LoRa.setSyncWord(LORA_SYNC_WORD);
+    LoRa.enableCrc();                 // senzorul emite cu CRC activ
+    LoRa.setTxPower(LORA_TX_POWER_DBM, PA_OUTPUT_PA_BOOST_PIN);
+
+    SpiBus::deselectAll();
+    return s_ready;
+  }
+
+  bool sendRaw(const uint8_t* data, uint8_t length) {
+    if (!s_ready) return false;
+
+    SpiBus::claimLoRa();
+    bool ok = false;
+    if (LoRa.beginPacket()) {
+      // LoRa.write(buffer, size) scrie octetii asa cum sunt, inclusiv
+      // 0x00 - spre deosebire de LoRa.print(String).
+      LoRa.write(data, length);
+      ok = (LoRa.endPacket() == 1);
+    }
+    SpiBus::deselectAll();
+
+    // Dupa emisie, libraria lasa radioul in standby. Testele care asculta
+    // reintra in receptie la urmatorul parsePacket(), deci nu e nevoie de
+    // nimic aici.
+    return ok;
+  }
+
+  bool receiveRaw(uint8_t* buffer, int maxLength, int& length,
+                  int& rssi, float& snr) {
+    if (!s_ready) return false;
+
+    SpiBus::claimLoRa();
+    bool got = false;
+    int size = LoRa.parsePacket();
+    if (size > 0) {
+      length = 0;
+      // Citim tot ce a venit, dar nu peste marginea bufferului. Un
+      // pachet mai lung decat maxLength ramane cu octetii in plus
+      // necititi; apelantul vede o lungime egala cu maxLength si il
+      // respinge oricum la validare.
+      while (LoRa.available() && length < maxLength) {
+        buffer[length++] = (uint8_t)LoRa.read();
+      }
+      rssi = LoRa.packetRssi();
+      snr  = LoRa.packetSnr();
+      got = true;
+    }
+    SpiBus::deselectAll();
+    return got;
+  }
+
+  void sleep() {
+    if (!s_ready) return;
+    SpiBus::claimLoRa();
+    LoRa.sleep();          // NU LoRa.end(): acela ar inchide SPI-ul comun
+    SpiBus::deselectAll();
+  }
+}
+
+
+// =====================================================================
+//  DeviceRegistry
+// =====================================================================
+
+// Lista de provisioning. VALORILE stau in Config.h
+// (PROVISIONED_DEVICES_INIT); aici se face doar instantierea, fiindca
+// Config.h nu are un .cpp propriu.
+static const ProvisionedDevice PROVISIONED_DEVICES[] = PROVISIONED_DEVICES_INIT;
+static const uint8_t PROVISIONED_COUNT =
+    sizeof(PROVISIONED_DEVICES) / sizeof(PROVISIONED_DEVICES[0]);
+
+// Pozitia din tabel devine DevAddr, deci un tabel mai lung decat
+// numerotarea ar produce senzori carora nu li se poate aloca niciun
+// numar. Se prinde la compilare, nu la prima inrolare esuata.
+static_assert(sizeof(PROVISIONED_DEVICES) / sizeof(PROVISIONED_DEVICES[0])
+                  <= HUB_MAX_SENSORS,
+              "PROVISIONED_DEVICES_INIT are mai multe randuri decat "
+              "HUB_MAX_SENSORS: ultimele placi nu ar primi niciun numar.");
+
+namespace DeviceRegistry {
+
+  // Se schimba ori de cate ori se modifica structura DeviceRecord. Un
+  // blob salvat cu alta versiune este ignorat si registrul porneste gol,
+  // in loc sa fie interpretat gresit octet cu octet.
+  // v2: DeviceRecord a primit resetAttempts si resetSentMs, pentru
+  //     dezinrolarea confirmata din F-031.
+  // v4: DeviceRecord a pierdut sessKey (16 octeti) si lastDevNonce (2),
+  //     odata cu scoaterea criptografiei. Blob-ul si-a schimbat deci
+  //     dimensiunea. Aici PRETUL obisnuit nu se plateste: senzorii
+  //     pornesc si ei goli, fiindca HEF_MAGIC_SESSION s-a schimbat in
+  //     acelasi commit, deci ambele capete sunt goale simultan si
+  //     recuperarea este cea normala - `pair` plus butonul 2.
+  // v3: DeviceRecord a primit lostPackets, lastTempX100, lastRssi,
+  //     hasReading si offlineReported, pentru vederea pe mai multi
+  //     senzori (tabelul `sensors` si contorul de pachete pierdute).
+  //     PRETUL, platit o singura data: la primul boot cu versiunea asta
+  //     registrul porneste gol, iar senzorii deja inrolati continua sa
+  //     emita cu sesiunile din HEF si apar ca "DevAddr ... nu este
+  //     inrolat". Fiecare trebuie reinrolat o data, manual.
+  static const uint8_t REGISTRY_BLOB_VERSION = 4;
+
+  static const char* KEY_VERSION = "ver";
+  static const char* KEY_COUNT   = "count";
+  static const char* KEY_BLOB    = "devices";
+
+  static Preferences   s_prefs;
+  static bool          s_open = false;
+  static DeviceRecord  s_devices[REGISTRY_MAX_DEVICES];
+  static uint8_t       s_count = 0;
+
+  static bool sameEui(const uint8_t* a, const uint8_t* b) {
+    return memcmp(a, b, DEV_EUI_LEN) == 0;
+  }
+
+  bool begin() {
+    // false = read/write. Numele spatiului are cel mult 15 caractere.
+    s_open = s_prefs.begin(REGISTRY_NVS_NAMESPACE, false);
+    if (!s_open) {
+      Serial.println(F("EROARE: nu s-a putut deschide NVS pentru registru."));
+      return false;
+    }
+    return load();
+  }
+
+  uint8_t count() { return s_count; }
+
+  DeviceRecord* at(uint8_t index) {
+    if (index >= s_count) return nullptr;
+    return &s_devices[index];
+  }
+
+  DeviceRecord* findByEui(const uint8_t* devEui) {
+    for (uint8_t i = 0; i < s_count; i++) {
+      if (sameEui(s_devices[i].devEui, devEui)) return &s_devices[i];
+    }
+    return nullptr;
+  }
+
+  DeviceRecord* findByAddr(uint8_t devAddr) {
+    for (uint8_t i = 0; i < s_count; i++) {
+      if (s_devices[i].devAddr == devAddr) return &s_devices[i];
+    }
+    return nullptr;
+  }
+
+  bool isProvisioned(const uint8_t* devEui) {
+    for (uint8_t i = 0; i < PROVISIONED_COUNT; i++) {
+      if (sameEui(PROVISIONED_DEVICES[i].devEui, devEui)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  uint8_t provisionedCount() { return PROVISIONED_COUNT; }
+
+  const uint8_t* provisionedEui(uint8_t index) {
+    if (index >= PROVISIONED_COUNT) return nullptr;
+    return PROVISIONED_DEVICES[index].devEui;
+  }
+
+  uint8_t addressForEui(const uint8_t* devEui) {
+    for (uint8_t i = 0; i < PROVISIONED_COUNT; i++) {
+      if (!sameEui(PROVISIONED_DEVICES[i].devEui, devEui)) continue;
+
+      // Pozitia in tabel, plus unu. Verificarea de mai jos este
+      // redundanta cu static_assert-ul de sus, dar costa un octet si
+      // acopera cazul in care cineva schimba doar HUB_MAX_SENSORS.
+      if (i >= HUB_MAX_SENSORS) return 0;
+      return (uint8_t)(i + 1);
+    }
+    return 0;
+  }
+
+  DeviceRecord* add(const uint8_t* devEui, uint8_t devAddr) {
+    DeviceRecord* record = findByEui(devEui);
+
+    if (record == nullptr) {
+      if (s_count >= REGISTRY_MAX_DEVICES) return nullptr;
+      record = &s_devices[s_count];
+      s_count++;
+      memset(record, 0, sizeof(DeviceRecord));
+      memcpy(record->devEui, devEui, DEV_EUI_LEN);
+    }
+
+    // O re-inrolare inseamna sesiune noua: contoarele o iau de la capat,
+    // exact ca pe senzor, care isi pune frameCounter pe 0 dupa join.
+    record->devAddr = devAddr;
+    record->lastFrameCounterUp = 0;
+    record->hasUplink = false;
+    record->downCounter = 0;
+    record->packets = 0;
+    record->lostPackets = 0;
+    record->pendingReset = false;
+    record->resetAttempts = 0;
+    record->resetSentMs = 0;
+    record->lastSeenMs = millis();
+    record->lastTempX100 = 0;
+    record->lastRssi = 0;
+    record->hasReading = false;
+    record->offlineReported = false;
+
+    save();
+    return record;
+  }
+
+  bool removeByEui(const uint8_t* devEui) {
+    for (uint8_t i = 0; i < s_count; i++) {
+      if (!sameEui(s_devices[i].devEui, devEui)) continue;
+
+      // Golul se umple mutand ultimul element pe pozitia eliberata:
+      // ordinea din registru nu inseamna nimic. Numarul senzorului NU
+      // depinde de ea - vine din tabelul de provisioning, nu de aici.
+      if (i != (uint8_t)(s_count - 1)) {
+        s_devices[i] = s_devices[s_count - 1];
+      }
+      s_count--;
+      save();
+      return true;
+    }
+    return false;
+  }
+
+  bool save() {
+    if (!s_open) return false;
+
+    s_prefs.putUChar(KEY_VERSION, REGISTRY_BLOB_VERSION);
+    s_prefs.putUChar(KEY_COUNT, s_count);
+
+    size_t bytes = (size_t)s_count * sizeof(DeviceRecord);
+    size_t written = s_prefs.putBytes(KEY_BLOB, s_devices, bytes);
+
+    return written == bytes;
+  }
+
+  bool load() {
+    if (!s_open) return false;
+
+    s_count = 0;
+
+    uint8_t version = s_prefs.getUChar(KEY_VERSION, 0);
+    if (version != REGISTRY_BLOB_VERSION) {
+      // Registru absent sau salvat de o versiune veche a structurii.
+      return true;
+    }
+
+    uint8_t stored = s_prefs.getUChar(KEY_COUNT, 0);
+    if (stored > REGISTRY_MAX_DEVICES) stored = REGISTRY_MAX_DEVICES;
+
+    size_t expected = (size_t)stored * sizeof(DeviceRecord);
+    if (expected == 0) return true;
+
+    size_t read = s_prefs.getBytes(KEY_BLOB, s_devices, expected);
+    if (read != expected) {
+      Serial.println(F("ATENTIE: registrul din NVS nu se potriveste ca marime; il ignor."));
+      return false;
+    }
+
+    s_count = stored;
+
+    // Campurile relative la millis() nu mai inseamna nimic dupa
+    // repornire. Pentru resetSentMs asta nu este doar curatenie: 0
+    // inseamna "niciun RESET trimis in sesiunea asta", iar verificarea de
+    // tacere refuza sa confirme o dezinrolare pe baza unui RESET pe care
+    // nu l-a trimis ea (F-031). Fara zeroizare, millis() mic minus o
+    // valoare veche mare ar da o diferenta uriasa si device-ul ar
+    // disparea din registru imediat dupa fiecare repornire a hub-ului.
+    //
+    // Ultima masuratoare se sterge din acelasi motiv de onestitate: o
+    // temperatura salvata acum trei saptamani nu are ce cauta in
+    // coloana "ultima citire" a tabelului `sensors`.
+    for (uint8_t i = 0; i < s_count; i++) {
+      s_devices[i].lastSeenMs = 0;
+      s_devices[i].resetSentMs = 0;
+      s_devices[i].hasReading = false;
+      s_devices[i].lastTempX100 = 0;
+      s_devices[i].lastRssi = 0;
+      s_devices[i].offlineReported = false;
+    }
+
+    return true;
+  }
+
+  void clear() {
+    s_count = 0;
+    if (s_open) {
+      s_prefs.clear();
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Afisare
+  // -------------------------------------------------------------------
+
+  // "#3" - numarul senzorului, adica DevAddr.
+  static void printNumber(uint8_t devAddr) {
+    Serial.print('#');
+    Serial.print(devAddr);
+  }
+
+  static void printAgeOrDash(uint32_t lastSeenMs) {
+    if (lastSeenMs == 0) {
+      Serial.print(F("   -"));
+      return;
+    }
+    uint32_t seconds = (millis() - lastSeenMs) / 1000UL;
+    if (seconds < 10)   Serial.print(F("  "));
+    else if (seconds < 100) Serial.print(' ');
+    Serial.print(seconds);
+    Serial.print('s');
+  }
+
+  /*
+   * Tabelul comenzii `sensors`.
+   *
+   * Se parcurge NUMEROTAREA, nu registrul: sunt afisate toate cele
+   * HUB_MAX_SENSORS locuri, in ordinea numerelor, si cele goale sunt
+   * aratate ca atare. Cu cinci placi in teren, intrebarea de zi cu zi nu
+   * este "ce contine registrul", ci "care dintre cele cinci lipseste" -
+   * iar la aceea o lista care sare peste locurile libere nu raspunde.
+   */
+  void printSensorTable() {
+    Serial.println();
+    Serial.println(F("=================================================================="));
+    Serial.print(F("  SENZORI  ("));
+    Serial.print(s_count);
+    Serial.print(F(" inrolati din "));
+    Serial.print(HUB_MAX_SENSORS);
+    Serial.println(F(" locuri)"));
+    Serial.println(F("=================================================================="));
+    Serial.println(F("   #  DevEUI            temperatura   varsta  RSSI   pach.  pierd."));
+    Serial.println(F("  ----------------------------------------------------------------"));
+
+    for (uint8_t number = 1; number <= HUB_MAX_SENSORS; number++) {
+      Serial.print(F("  "));
+      if (number < 10) Serial.print(' ');
+      printNumber(number);
+      Serial.print(' ');
+
+      DeviceRecord* d = findByAddr(number);
+
+      if (d == nullptr) {
+        const uint8_t* eui = provisionedEui((uint8_t)(number - 1));
+        if (eui == nullptr) {
+          Serial.println(F(" (niciun senzor provizionat pe acest numar)"));
+        } else {
+          Serial.print(' ');
+          SensorPacketCodec::printEui(eui);
+          Serial.println(F("  NEINROLAT - 'pair' pe hub + butonul 2 pe senzor"));
+        }
+        continue;
+      }
+
+      Serial.print(' ');
+      SensorPacketCodec::printEui(d->devEui);
+      Serial.print(F("  "));
+
+      if (!d->hasReading) {
+        Serial.print(F("       -  "));
+      } else if (d->lastTempX100 == SENSOR_TEMP_INVALID) {
+        Serial.print(F("  EROARE  "));
+      } else {
+        float celsius = d->lastTempX100 / 100.0f;
+        if (celsius >= 0 && celsius < 10) Serial.print(' ');
+        if (celsius > -10 && celsius < 100) Serial.print(' ');
+        Serial.print(celsius, 2);
+        Serial.print(F(" C  "));
+      }
+
+      printAgeOrDash(d->lastSeenMs);
+      Serial.print(F("  "));
+
+      if (d->hasReading) {
+        Serial.print(d->lastRssi);
+      } else {
+        Serial.print(F("   -"));
+      }
+
+      Serial.print(F("  "));
+      Serial.print(d->packets);
+      Serial.print(F("  "));
+      Serial.print(d->lostPackets);
+
+      if (d->pendingReset) {
+        Serial.print(F("   [DEZINROLARE IN CURS]"));
+      } else if (d->offlineReported) {
+        Serial.print(F("   [NU SE MAI AUDE]"));
+      }
+
+      Serial.println();
+    }
+
+    Serial.println(F("  ----------------------------------------------------------------"));
+    Serial.println(F("  'pierd.' = goluri in frame counter, adica pachete care nu au ajuns:"));
+    Serial.println(F("  coliziuni intre senzori sau acoperire slaba. Cateva la mii de"));
+    Serial.println(F("  pachete sunt normale; o crestere continua pe UN singur senzor"));
+    Serial.println(F("  inseamna semnal slab, iar pe DOI in acelasi timp inseamna ca se"));
+    Serial.println(F("  ciocnesc intre ei."));
+    Serial.println(F("=================================================================="));
+  }
+
+}
+
+
+// =====================================================================
+//  SensorLink
+// =====================================================================
 
 namespace SensorLink {
 
@@ -36,9 +489,8 @@ namespace SensorLink {
 
   // Momentul ultimului pachet primit pe radio, valid sau nu. Restul
   // sistemului se uita aici inainte de a face ceva lung - vezi lastRxMs()
-  // in SensorLink.h.
+  // in HubSensors.h.
   static unsigned long s_lastRxMs = 0;
-
 
   bool isPairingMode() { return s_pairingMode; }
 

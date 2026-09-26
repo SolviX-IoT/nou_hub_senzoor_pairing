@@ -15,6 +15,24 @@ Arduino IDE cere ca folderul sketch-ului si fisierul `.ino` principal sa
 aiba acelasi nume. Se deschide `SolvixHub_Tests.ino`; celelalte fisiere
 apar automat ca tab-uri.
 
+## Unde e fiecare lucru
+
+Sketch-ul are 16 fisiere, grupate pe domenii. Fiecare modul este un
+`namespace` cu numele lui, deci o cautare dupa `SensorLink::` sau
+`HubCloud::` duce direct la el.
+
+| Fisier | Module | Ce face |
+|--------|--------|---------|
+| `SolvixHub_Tests.ino` | — | `setup()`, `loop()`, butonul 1 |
+| `Config.h` | — | toti pinii si toate constantele |
+| `HubBoard.*` | `SpiBus`, `Leds`, `Console` | magistrala SPI partajata, LED-urile, afisarea pe Serial |
+| `HubSensors.*` | `LoRaRadio`, `DeviceRegistry`, `SensorLink` | radioul, registrul senzorilor, pairing / date / dezinrolare |
+| `SensorPacket.*` | `SensorPacketCodec` | oglinda protocolului din `senzor/main.c` |
+| `HubNet.*` | `NetLink`, `Http` | reteaua si cererile HTTP |
+| `HubCloud.*` | `HubIdentity`, `HubCloud` | identitatea din NVS si bootstrap-ul in cloud |
+| `HubHeartbeat.*` | `HubHeartbeat` | heartbeat-ul si preluarea configului |
+| `SerialConsole.*` | `SerialConsole` | comenzile `pair`, `status`, `remove` |
+
 ## Librarii necesare
 
 Din Library Manager:
@@ -363,7 +381,8 @@ HIGH. Daca ambele CS-uri ajung LOW simultan, cele doua module trag de
 acelasi fir: datele sunt gunoi si, pe termen lung, iesirile se pot
 deteriora.
 
-Masurile luate, toate in [SpiBus.h](SpiBus.h) si [SpiBus.cpp](SpiBus.cpp):
+Masurile luate, toate in modulul `SpiBus`, din [HubBoard.h](HubBoard.h) si
+[HubBoard.cpp](HubBoard.cpp):
 
 1. `SPI.begin()` se apeleaza **o singura data**, din `setup()`. Niciun
    test nu reinitializeaza magistrala.

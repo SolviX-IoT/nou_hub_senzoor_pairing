@@ -49,14 +49,14 @@
   CINE BATE: corpul cererii NU contine niciun identificator de hub.
   Singurul lucru care spune serverului cine suntem este antetul
   X-Solvix-ApiKey, cu cheia per hub primita la provisioning. Ea nu apare
-  niciodata pe Serial (regula 11 din CLAUDE.md).
+  niciodata pe Serial (regula 8 din CLAUDE.md).
 
   CE SE TRIMITE, SI CE ESTE INVENTAT
   ---------------------------------------------------------------------
   Schema serverului cere douazeci de campuri. Placa asta poate masura
   onest opt dintre ele; restul sunt hardware pe care hub-ul nu il are.
   Ele se trimit cu valori fixe, si FIECARE ISI POARTA PRESUPUNEREA scrisa
-  alaturi in HubHeartbeat.cpp (regula 6.2.5) - o cifra plauzibila si
+  alaturi in HubHeartbeat.cpp (regula 3.4 din CLAUDE.md) - o cifra plauzibila si
   inventata este mai rea decat un zero care se vede ca zero.
 
   A DOUA CERERE: GET /api/device/config

@@ -91,13 +91,9 @@
 */
 
 #include "Config.h"
-#include "SpiBus.h"
-#include "Leds.h"
-#include "Console.h"
-#include "DeviceRegistry.h"
-#include "SensorLink.h"
-#include "NetLink.h"
-#include "HubIdentity.h"
+#include "HubBoard.h"
+#include "HubSensors.h"
+#include "HubNet.h"
 #include "HubCloud.h"
 #include "HubHeartbeat.h"
 #include "SerialConsole.h"

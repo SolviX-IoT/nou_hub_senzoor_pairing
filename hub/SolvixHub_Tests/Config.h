@@ -163,8 +163,7 @@ extern byte HUB_MAC[6];
 //
 // Daca schimbi constantele de somn ale senzorului, sau daca cresti
 // HUB_MAX_SENSORS (ultimul senzor primeste automat cel mai lung
-// interval!), schimbi si valoarea de aici - regula 11 din CLAUDE.md,
-// sectiunea 10.
+// interval!), schimbi si valoarea de aici - regula 6 din CLAUDE.md.
 #define REMOVE_CONFIRM_SILENCE_MS 180000UL
 
 // 1 = dupa o dezinrolare CONFIRMATA, hub-ul redeschide singur fereastra
@@ -281,7 +280,7 @@ extern byte HUB_MAC[6];
 // raspunde cu numarul din tabel, placa asteapta numarul ei compilat,
 // nu se potrivesc, JOIN_ACCEPT-ul este aruncat si LED2 da trei clipiri.
 //
-// Tabelul este instantiat in DeviceRegistry.cpp; aici stau doar valorile,
+// Tabelul este instantiat in HubSensors.cpp; aici stau doar valorile,
 // ca sa ramana adevarata regula "constantele traiesc in Config.h".
 #define PROVISIONED_DEVICES_INIT {   /* #1 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x01 } },            /* #2 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x02 } },            /* #3 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x03 } },            /* #4 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x04 } },            /* #5 */ { { 0x53, 0x4F, 0x4C, 0x56, 0x49, 0x58, 0x00, 0x05 } },          }
 
@@ -291,7 +290,7 @@ extern byte HUB_MAC[6];
 // =====================================================================
 // Hub-ul are nevoie de o singura cale spre exterior la un moment dat.
 // Astazi este Ethernet; WiFi urmeaza. Comutatorul de mai jos alege ce se
-// compileaza in NetLink.cpp.
+// compileaza in HubNet.cpp.
 //
 // De ce un comutator de compilare si nu o clasa abstracta cu doua
 // implementari: pe un aparat care are exact un transport, polimorfismul
@@ -359,7 +358,7 @@ extern byte HUB_MAC[6];
 #define CLOUD_ADMIN_KEY           "bli009t664p53JZYeRJ8y5cjoe9J2MK1E8BJTAXE7aWr"
 
 // MASURAT: serverul raspunde cu "Transfer-Encoding: chunked", FARA
-// Content-Length (Kestrel). De-chunker-ul din Http.cpp nu este deci o
+// Content-Length (Kestrel). De-chunker-ul din HubNet.cpp nu este deci o
 // precautie teoretica - fara el, ArduinoJson ar primi antetul de chunk
 // lipit de JSON, ar da InvalidInput la fiecare cerere, iar hub-ul ar
 // raporta la nesfarsit "baza de date nu raspunde" cu un server sanatos.
@@ -505,7 +504,7 @@ extern byte HUB_MAC[6];
 // singurul lucru din cerere care spune serverului CINE bate - corpul nu
 // contine niciun identificator de hub.
 //
-// VALOAREA NU SE AFISEAZA NICIODATA PE Serial (regula 11 din CLAUDE.md).
+// VALOAREA NU SE AFISEAZA NICIODATA PE Serial (regula 8 din CLAUDE.md).
 // Antetul se compune intr-un tampon si se da direct lui Http; jurnalul
 // spune cel mult ca exista o cheie, niciodata continutul ei.
 #define CLOUD_API_KEY_HEADER      "X-Solvix-ApiKey"
